@@ -1,368 +1,290 @@
 """
 Author: Pavel Timonin
 Created: 2025-04-24
-Description: This script contains classes and functions for SOLO model building.
+Description: This script contains classes and functions for Mask2Former model building.
 """
-
 
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import Conv2D, UpSampling2D, Add
+from tensorflow.keras.layers import (
+    Conv2D,
+    UpSampling2D,
+    Add,
+    Dense,
+    Layer,
+)
 from tensorflow.keras.models import Model
+from pixel_decoder import MSDeformablePixelDecoder
+from transformer_decoder import TransformerDecoder
 
-def build_fpn_resnet50(input_shape=(224, 224, 3), ouput_kernels_number=256):
+
+# ---------------------------------------------------------------------
+# FPN-ResNet50 backbone
+# ---------------------------------------------------------------------
+
+def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
     """
-        Builds a Feature Pyramid Network (FPN) on top of a ResNet50 backbone.
-
-        This function extracts feature maps from different stages of ResNet50 and constructs
-        a feature pyramid with lateral and smoothing connections for multi-scale feature representation.
-
-        Args:
-            input_shape (tuple): The shape of the input images.
-            ouput_kernels_number (int): Number of output channels for each pyramid level.
-
-        Returns:
-            tf.keras.Model: A Keras model with inputs as the image tensor and outputs as a list
-            of feature maps [p2, p3, p4, p5] from different FPN levels.
-    """
-    # Load the ResNet50 model without the top classification layer
-    #backbone = ResNet50(include_top=False, input_shape=input_shape)
-    backbone = ResNet50(weights='imagenet', include_top=False, input_shape=input_shape)
-    backbone.trainable = True
-
-    # Define the layers to extract features from
-    c2_output = backbone.get_layer("conv2_block3_out").output
-    c3_output = backbone.get_layer("conv3_block4_out").output
-    c4_output = backbone.get_layer("conv4_block6_out").output
-    c5_output = backbone.get_layer("conv5_block3_out").output
-
-    # Lateral connections
-    p5 = Conv2D(256, (1, 1), padding='same')(c5_output)
-    p4 = Add()([
-        UpSampling2D()(p5),
-        Conv2D(256, (1, 1), padding='same')(c4_output)
-    ])
-    p3 = Add()([
-        UpSampling2D()(p4),
-        Conv2D(256, (1, 1), padding='same')(c3_output)
-    ])
-    p2 = Add()([
-        UpSampling2D()(p3),
-        Conv2D(256, (1, 1), padding='same')(c2_output)
-    ])
-
-    # Smoothing layers
-    p5 = Conv2D(ouput_kernels_number, (3, 3), padding='same')(p5)
-    p4 = Conv2D(ouput_kernels_number, (3, 3), padding='same')(p4)
-    p3 = Conv2D(ouput_kernels_number, (3, 3), padding='same')(p3)
-    p2 = Conv2D(ouput_kernels_number, (3, 3), padding='same')(p2)
-
-    # Create the model
-    return Model(inputs=backbone.input, outputs=[p2, p3, p4, p5])
-
-
-def append_coord_channels(features):
-    """
-    Append (x, y) coordinate channels to `features`.
-
-    Args:
-        features (Tensor): features of shape [B, H, W, C]
+    Builds a Feature Pyramid Network (FPN) on top of a ResNet50 backbone.
 
     Returns:
-        The same tensor with added pixel coordinates, that are normalized to [-1, 1] shape [B, H, W, C+2]
+        tf.keras.Model with inputs=image tensor and outputs=[p2, p3, p4, p5].
     """
-    shape = tf.shape(features)
-    batch_size, height, width = shape[0], shape[1], shape[2]
+    backbone = ResNet50(
+        weights="imagenet", include_top=False, input_shape=input_shape
+    )
+    backbone.trainable = False
 
-    # Create a grid of x coordinates in [-1, 1], shape [width]
-    x_coords = tf.linspace(-1.0, 1.0, width)
-    # Create a grid of y coordinates in [-1, 1], shape [height]
-    y_coords = tf.linspace(-1.0, 1.0, height)
+    # ResNet feature maps
+    c2_output = backbone.get_layer("conv2_block3_out").output  # stride 4
+    c3_output = backbone.get_layer("conv3_block4_out").output  # stride 8
+    c4_output = backbone.get_layer("conv4_block6_out").output  # stride 16
+    c5_output = backbone.get_layer("conv5_block3_out").output  # stride 32
 
-    # Meshgrid => xgrid,ygrid of shape [height, width]
-    xgrid, ygrid = tf.meshgrid(x_coords, y_coords)
+    # Lateral connections
+    p5 = Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c5")(c5_output)
+    p4 = Add(name="fpn_p4_add")(
+        [
+            UpSampling2D(name="fpn_p5_upsample")(p5),
+            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c4")(c4_output),
+        ]
+    )
+    p3 = Add(name="fpn_p3_add")(
+        [
+            UpSampling2D(name="fpn_p4_upsample")(p4),
+            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c3")(c3_output),
+        ]
+    )
+    p2 = Add(name="fpn_p2_add")(
+        [
+            UpSampling2D(name="fpn_p3_upsample")(p3),
+            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c2")(c2_output),
+        ]
+    )
 
-    # Expand dims => [height, width, 1]
-    xgrid = tf.expand_dims(xgrid, axis=-1)
-    ygrid = tf.expand_dims(ygrid, axis=-1)
+    # Smoothing (3×3 convs)
+    p5 = Conv2D(
+        ouput_kernels_number, (3, 3), padding="same", name="fpn_p5_smooth"
+    )(p5)
+    p4 = Conv2D(
+        ouput_kernels_number, (3, 3), padding="same", name="fpn_p4_smooth"
+    )(p4)
+    p3 = Conv2D(
+        ouput_kernels_number, (3, 3), padding="same", name="fpn_p3_smooth"
+    )(p3)
+    p2 = Conv2D(
+        ouput_kernels_number, (3, 3), padding="same", name="fpn_p2_smooth"
+    )(p2)
 
-    # Tile to match batch => [B, H, W, 1]
-    xgrid = tf.tile(tf.expand_dims(xgrid, 0), [batch_size, 1, 1, 1])
-    ygrid = tf.tile(tf.expand_dims(ygrid, 0), [batch_size, 1, 1, 1])
-
-    # Concat => [B, H, W, 2]
-    coords = tf.concat([xgrid, ygrid], axis=-1)
-
-    # Concat with original features => [B, H, W, C+2]
-    features_with_coords = tf.concat([features, coords], axis=-1)
-    return features_with_coords
+    return Model(inputs=backbone.input, outputs=[p2, p3, p4, p5], name="fpn_resnet50")
 
 
-class ConvGNReLU(tf.keras.layers.Layer):
+# ---------------------------------------------------------------------
+# Mask2Former Head (class + mask prediction)
+# ---------------------------------------------------------------------
+class Mask2FormerHead(Layer):
     """
-    A block performing 3x3 conv -> group norm -> ReLU.
+    Mask2Former-style head on top of pixel features.
+
+    Inputs:
+        memory:        (B, HW, C)    flattened encoder/pixel features
+        mask_features: (B, Hm, Wm, C) per-pixel features used to generate masks
+
+    Outputs (all Tensors, graph-friendly):
+        pred_logits:      (B, num_queries, num_classes + 1)
+        pred_masks:       (B, num_queries, Hm, Wm)
     """
-    def __init__(self, out_channels, kernel_size=3, groups=32):
-        """
-       Initializes the ConvGNReLU block.
 
-       Args:
-           out_channels (int): Number of output channels for the convolution layer.
-           kernel_size (int, optional): Size of the convolution kernel. Defaults to 3.
-           groups (int, optional): Number of groups for Group Normalization. Defaults to 32.
-        """
-        super(ConvGNReLU, self).__init__()
-        self.conv = Conv2D(
-            out_channels,
-            kernel_size,
-            padding='same',
-            use_bias=False
-        )
-        self.gn = tf.keras.layers.GroupNormalization(groups=groups, axis=-1)
-        self.relu = tf.keras.layers.ReLU()
-
-    def call(self, x, training=None, **kwargs):
-        x = self.conv(x)
-        x = self.gn(x)
-        x = self.relu(x)
-        return x
-
-
-class MaskFeatureFusion(tf.keras.layers.Layer):
-    """
-    Fuses multi-level FPN features to produce a unified mask feature map.
-    - out_channels: number of channels for the mask feature map (denoted as E).
-    """
-    def __init__(self, out_channels=128, groups=32, use_coord_conv=True):
-        """
-        Initializes the MaskFeatureFusion layer.
-
-        Args:
-            out_channels (int, optional): Number of output channels for the mask feature map. Defaults to 128.
-            groups (int, optional): Number of groups for Group Normalization. Defaults to 32.
-            use_coord_conv (bool, optional): Flag indicating whether to use coordinate convolution. Defaults to True.
-        """
-        super(MaskFeatureFusion, self).__init__()
-
-        self.use_coord_conv = use_coord_conv
-
-        def make_conv_block():
-            return tf.keras.Sequential([
-                ConvGNReLU(out_channels, kernel_size=3, groups=groups),
-                ConvGNReLU(out_channels, kernel_size=3, groups=groups),
-                ConvGNReLU(out_channels, kernel_size=3, groups=groups),
-                ConvGNReLU(out_channels, kernel_size=3, groups=groups),
-            ])
-
-        self.conv_P5 = make_conv_block()
-        self.conv_P4 = make_conv_block()
-        self.conv_P3 = make_conv_block()
-        self.conv_P2 = make_conv_block()
-        # Convs after merging each level
-        self.merge_conv_P5 = ConvGNReLU(out_channels, kernel_size=3, groups=groups)
-        self.merge_conv_P4 = ConvGNReLU(out_channels, kernel_size=3, groups=groups)
-        self.merge_conv_P3 = ConvGNReLU(out_channels, kernel_size=3, groups=groups)
-        self.merge_conv_P2 = ConvGNReLU(out_channels, kernel_size=3, groups=groups)
-        # Final 1x1 conv to output the mask feature map
-        self.conv_fuse = ConvGNReLU(out_channels, kernel_size=1, groups=groups)
-
-    def call(self, fpn_features, training=None, **kwargs):
-        P2, P3, P4, P5 = fpn_features  # expect a list of FPN feature maps
-        if self.use_coord_conv:
-            P5 = append_coord_channels(P5)
-        # Process P5 and upsample to P4's size
-        P5_merged = self.merge_conv_P5(self.conv_P5(P5, training=training), training=training)
-        P5_upsampled = tf.image.resize(P5_merged, size=tf.shape(P4)[1:3], method='bilinear')
-        # Add to P4, then refine and upsample to P3's size
-        P4_merged = self.merge_conv_P4(self.conv_P4(P4, training=training) + P5_upsampled, training=training)
-        P4_upsampled = tf.image.resize(P4_merged, size=tf.shape(P3)[1:3], method='bilinear')
-        # Add to P3, refine and upsample to P2's size
-        P3_merged = self.merge_conv_P3(self.conv_P3(P3, training=training) + P4_upsampled, training=training)
-        P3_upsampled = tf.image.resize(P3_merged, size=tf.shape(P2)[1:3], method='bilinear')
-        # Add to P2 and refine
-        P2_merged = self.merge_conv_P2(self.conv_P2(P2, training=training) + P3_upsampled, training=training)
-        # Final 1x1 conv to produce the unified mask feature map (at P2 resolution, 1/4 of input)
-        mask_feature_map = self.conv_fuse(P2_merged, training=training)
-        return mask_feature_map
-
-
-class DynamicSOLOHead(tf.keras.layers.Layer):
-    """
-    Dynamic SOLO head.
-
-    This layer generates dynamic convolutional kernels and classification scores
-    for each grid cell in a feature map, enabling per-instance mask prediction.
-    """
-    def __init__(self,
-                 num_classes,
-                 grid_size,
-                 num_stacked_convs=4,
-                 mask_kernel_channels=256,
-                 use_coordconv=False,
-                 name='VanillaSOLOHead',
-                 **kwargs):
-        """
-        Initializes the DynamicSOLOHead layer.
-
-        Args:
-            num_classes (int): Number of object classes for classification.
-            grid_size (int): Grid size to divide the image into cells for instance prediction.
-            num_stacked_convs (int, optional): Number of stacked convolutions in each branch. Defaults to 4.
-            mask_kernel_channels (int, optional): Number of output channels for the mask kernel generation. Defaults to 256.
-            use_coordconv (bool, optional): Whether to include coordinate channels in the convolution. Defaults to False.
-            name (str, optional): Name for the layer. Defaults to 'VanillaSOLOHead'.
-            **kwargs: Additional keyword arguments for the base Layer class.
-        """
-        super(DynamicSOLOHead, self).__init__(name=name, **kwargs)
-
-        self.num_classes = num_classes
-        self.use_coordconv = use_coordconv
-
-        # Resize features to grid size
-        self.resize_layer = tf.keras.layers.Resizing(grid_size, grid_size, interpolation='bilinear',
-                                                     name=f'{name}_resize')
-
-        # ----------------------------------------------------------------------
-        # Classification branch
-        # ----------------------------------------------------------------------
-        # We build each layer as a small sub-network:
-        #    Conv2D -> GroupNorm -> ReLU
-        self.cls_convs = []
-        for i in range(num_stacked_convs):
-            self.cls_convs.append(
-                tf.keras.Sequential([
-                    tf.keras.layers.Conv2D(
-                        256,
-                        kernel_size=3,
-                        padding='same',
-                        use_bias=False,  # Because BN will handle the bias term
-                        name=f'{name}_cls_conv_{i}'
-                    ),
-                    tf.keras.layers.GroupNormalization(name=f'{name}_cls_bn_{i}'),
-                    tf.keras.layers.ReLU(name=f'{name}_cls_relu_{i}')
-                ], name=f'{name}_cls_block_{i}')
-            )
-
-        self.cls_logits = tf.keras.layers.Conv2D(num_classes, kernel_size=1, padding='same', name=f'{name}_cls_logits')
-
-        # ----------------------------------------------------------------------
-        # Mask branch
-        # ----------------------------------------------------------------------
-        self.mask_convs = []
-        for i in range(num_stacked_convs):
-            self.mask_convs.append(
-                tf.keras.Sequential([
-                    tf.keras.layers.Conv2D(
-                        256,
-                        kernel_size=3,
-                        padding='same',
-                        use_bias=False,
-                        name=f'{name}_mask_conv_{i}'
-                    ),
-                    tf.keras.layers.GroupNormalization(name=f'{name}_mask_bn_{i}'),
-                    tf.keras.layers.ReLU(name=f'{name}_mask_relu_{i}')
-                ], name=f'{name}_mask_block_{i}')
-            )
-
-        self.mask_logits = tf.keras.layers.Conv2D(
-            filters=mask_kernel_channels,
-            kernel_size=3,
-            padding='same',
-            name=f'{name}_mask_logits'
-        )
-
-    def call(self, fpn_feature, training=False):
-        # Resize to grid size
-        x_resized = self.resize_layer(fpn_feature)
-
-        # Classification branch
-        x_cls = x_resized
-        for seq_block in self.cls_convs:
-            x_cls = seq_block(x_cls, training=training)
-
-        cls_output = self.cls_logits(x_cls, training=training)  # [B, S, S, num_classes]
-
-        # Mask branch
-        x = x_resized
-        if self.use_coordconv:
-            x = append_coord_channels(x)
-        x_mask = x
-
-        for seq_block in self.mask_convs:
-            x_mask = seq_block(x_mask, training=training)
-
-        mask_output = self.mask_logits(x_mask, training=training)  # [B, S, S, E]
-
-        return cls_output, mask_output
-
-
-class SOLOModel(tf.keras.Model):
-    """
-    SOLO (Segmenting Objects by Locations) model.
-
-    This model integrates a backbone, FPN, and dynamic heads to perform instance segmentation
-    by predicting object masks directly at different grid levels.
-    """
     def __init__(
         self,
-        input_shape=(None, None, 3),
-        num_classes=80,
-        grid_sizes=[40, 36, 24, 16],
-        num_stacked_convs=4,
-        head_input_channels=256,
-        mask_kernel_channels=256,
-        **kwargs
+        num_classes,
+        num_queries=100,
+        d_model=256,
+        num_decoder_layers=6,
+        num_heads=8,
+        dim_feedforward=1024,
+        dropout=0.1,
+        **kwargs,
     ):
-        """
-        Initializes the SOLOModel.
-
-        Args:
-            input_shape (tuple, optional): Shape of the input images. Defaults to (None, None, 3).
-            num_classes (int, optional): Number of object classes. Defaults to 80.
-            grid_sizes (list, optional): Grid sizes for different feature levels. Defaults to [40, 36, 24, 16].
-            num_stacked_convs (int, optional): Number of stacked conv layers in the SOLO head. Defaults to 1.
-            head_input_channels (int, optional): Input channels for the SOLO head. Defaults to 256.
-            mask_kernel_channels (int, optional): Output channels for mask kernel conv layers. Defaults to 256.
-            **kwargs: Additional keyword arguments for the base Model class.
-        """
         super().__init__(**kwargs)
+        self.num_classes = num_classes
+        self.num_queries = num_queries
+        self.d_model = d_model
+
+        # Learnable query embeddings (content + positional, concatenated)
+        self.query_embed = self.add_weight(
+            name="query_embed",
+            shape=(num_queries, d_model * 2),
+            initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+            trainable=True,
+        )
+        # Transformer decoder (with mask attention)
+        self.decoder = TransformerDecoder(
+            num_layers=num_decoder_layers, d_model=d_model,
+            num_heads=num_heads, dim_feedforward=dim_feedforward,
+            dropout=dropout, name="transformer_decoder",
+        )
+        # Classification head and Mask embedding head
+        prior_prob = 0.01
+        bias_value = -tf.math.log((1.0 - prior_prob) / prior_prob)
+
+        self.class_embed = Dense(num_classes + 1, name="class_embed", bias_initializer=tf.keras.initializers.Constant(bias_value))  # (includes "no object")
+        self.mask_embed = tf.keras.Sequential([
+            Dense(d_model, activation="relu"), Dense(d_model)
+        ], name="mask_embed_mlp")
+
+    def call(self, memory_list, memory_pos_list, decoder_shapes, mask_features, training=False):
+        """
+        Args:
+            memory_list: list of encoder feature maps (flattened) [B, S_l, C] for each feature level.
+            memory_pos_list: list of positional encodings [B, S_l, C] for each feature level.
+            decoder_shapes: Tensor [L, 2] giving (H_l, W_l) for each feature level in memory_list.
+            mask_features: [B, Hm, Wm, C] low-level feature map for computing masks (e.g., backbone output at 1/4 resolution).
+        Returns:
+            pred_logits: [B, num_queries, num_classes+1] final class scores (for the last decoder layer).
+            pred_masks:  [B, num_queries, Hm, Wm] final predicted mask logits (for the last decoder layer).
+            aux_outputs (optional): list of dicts with intermediate predictions for auxiliary losses (one per decoder layer).
+        """
+        B = tf.shape(mask_features)[0]
+        # Prepare query embeddings
+        query_embed = tf.tile(self.query_embed[tf.newaxis, :, :], [B, 1, 1])  # [B, Q, 2C]
+        query_content, query_pos = tf.split(query_embed, 2, axis=-1)  # each [B, Q, C]
+        tgt = query_content  # initial query content (to be updated by decoder)
+
+        # Run the transformer decoder (with masked attention)
+        decoder_outputs = self.decoder(
+            tgt=tgt,
+            memory_list=memory_list,
+            memory_pos_list=memory_pos_list,
+            decoder_shapes=decoder_shapes,
+            query_pos=query_pos,
+            mask_features=mask_features,
+            mask_embed_fn=self.mask_embed,
+            training=training,
+        )
+
+        # The decoder may include an initial state in intermediate_states; the last element is the final output
+        if isinstance(decoder_outputs, list):
+            intermediate_outputs = decoder_outputs
+            final_output = intermediate_outputs[-1]  # [B, Q, C] from last decoder layer
+        else:
+            # If decoder is implemented to directly return final output
+            intermediate_outputs = None
+            final_output = decoder_outputs
+
+        # Compute class and mask predictions for each decoder output
+        all_class_logits = []
+        all_mask_logits = []
+        if intermediate_outputs is not None:
+            for dec_out in intermediate_outputs:
+                class_logits = self.class_embed(dec_out, training=training)  # [B, Q, num_classes+1]
+                mask_embed = self.mask_embed(dec_out, training=training)  # [B, Q, C]
+                mask_logits = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)  # [B, Q, Hm, Wm]
+                all_class_logits.append(class_logits)
+                all_mask_logits.append(mask_logits)
+        else:
+            # If no intermediate list (should not happen in this design), just compute from final_output
+            class_logits = self.class_embed(final_output, training=training)
+            mask_embed = self.mask_embed(final_output, training=training)
+            mask_logits = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)
+            all_class_logits.append(class_logits)
+            all_mask_logits.append(mask_logits)
+
+        # Stack outputs: shape [B, Layers, Q, ...]
+        all_class_logits = tf.stack(all_class_logits, axis=1)  # [B, L_dec, Q, num_classes+1]
+        all_mask_logits = tf.stack(all_mask_logits, axis=1)  # [B, L_dec, Q, Hm, Wm]
+
+        # Final predictions from the last layer (for inference)
+        pred_logits = all_class_logits[:, -1, ...]  # [B, Q, num_classes+1]
+        pred_masks = all_mask_logits[:, -1, ...]  # [B, Q, Hm, Wm]
+
+        # (Optional) auxiliary outputs for intermediate layers (for training loss)
+        aux_outputs = [
+            {"pred_logits": all_class_logits[:, i, ...], "pred_masks": all_mask_logits[:, i, ...]}
+            for i in range(all_class_logits.shape[1] - 1)  # exclude the last one, as it's the final output
+        ]
+
+        return pred_logits, pred_masks, aux_outputs
+
+
+# ---------------------------------------------------------------------
+# Full Mask2Former-style Keras Model
+# ---------------------------------------------------------------------
+
+class Mask2FormerModel(tf.keras.Model):
+    """
+    TensorFlow implementation of a Mask2Former-style model.
+
+    Architecture:
+        image -> FPN-ResNet50 -> mask feature map (stride 4)
+              -> transformer-based Mask2Former head
+              -> class logits + mask logits
+
+    This is a *model-only* implementation: no loss functions or matching.
+    """
+
+    def __init__(
+        self,
+        input_shape=(480, 480, 3),
+        transformer_input_channels=256,
+        num_classes=80,
+        num_queries=100,
+        num_decoder_layers=6,
+        num_heads=8,
+        dim_feedforward=1024,
+        dropout=0.1,
+        name="mask2former_tf",
+        **kwargs,
+    ):
+        super().__init__(name=name, **kwargs)
 
         self.num_classes = num_classes
-        self.num_scales = len(grid_sizes)
+        self.num_queries = num_queries
+        self.transformer_input_channels = transformer_input_channels
 
-        # Build FPN-ResNet backbone
-        self.backbone = build_fpn_resnet50(input_shape, ouput_kernels_number=head_input_channels)
+        # 1) FPN-ResNet backbone
+        self.backbone = build_fpn_resnet50(
+            input_shape=input_shape,
+            ouput_kernels_number=transformer_input_channels,
+        )
 
-        # Build the head layer for each scale
-        self.solo_heads = []
-        for i in range(self.num_scales):
-            head = DynamicSOLOHead(
-                num_classes=num_classes,
-                grid_size=grid_sizes[i],
-                num_stacked_convs=num_stacked_convs,
-                mask_kernel_channels=mask_kernel_channels,
-                use_coordconv=True,  # use CoordConv in the head
-                name=f'DynamicSOLOHead_{i}'
-            )
-            self.solo_heads.append(head)
+        self.pixel_decoder = MSDeformablePixelDecoder(
+            d_model=transformer_input_channels,
+            num_feature_levels=4,  # p2, p3, p4, p5
+            transformer_num_feature_levels=3,  # deformable encoder uses p3, p4, p5
+            num_encoder_layers=6,  # or any value you prefer
+            n_heads=num_heads,
+            n_points=4,  # typical value in Mask2Former
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            name="pixel_decoder",
+        )
 
-        # Create the mask feature branch (used after the FPN outputs)
-        self.mask_feat_branch = MaskFeatureFusion(out_channels=mask_kernel_channels)
+        # 3) Mask2Former head
+        self.mask2former_head = Mask2FormerHead(
+            num_classes=num_classes,
+            num_queries=num_queries,
+            d_model=transformer_input_channels,
+            num_decoder_layers=num_decoder_layers,
+            num_heads=num_heads,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            name="mask2former_head",
+        )
 
     def call(self, inputs, training=False):
-        # FPN outputs
-        fpn_outputs = self.backbone(inputs, training=training)
+        p2, p3, p4, p5 = self.backbone(inputs, training=training)
 
-        class_outputs = []
-        mask_outputs = []
+        memory_list, memory_pos_list, decoder_shapes, mask_features = self.pixel_decoder(
+            [p2, p3, p4, p5],
+            training=training,
+        )
 
-        # SOLO Head on each FPN scale
-        for i, fpn_output in enumerate(fpn_outputs):
-            class_out, mask_out = self.solo_heads[i](fpn_output, training=training)
-            class_outputs.append(class_out)
-            mask_outputs.append(mask_out)
+        pred_logits, pred_masks, aux_outputs = self.mask2former_head(
+            memory_list=memory_list,
+            memory_pos_list=memory_pos_list,
+            decoder_shapes=decoder_shapes,
+            mask_features=mask_features,
+            training=training,
+        )
 
-        # Mask feature branch
-        mask_feat = self.mask_feat_branch(fpn_outputs, training=training)
-
-        return (class_outputs, mask_outputs, mask_feat)
+        return pred_logits, pred_masks, aux_outputs
