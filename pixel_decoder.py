@@ -298,6 +298,8 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
             ta_ = ta_.write(lvl, ref)
             return lvl + 1, ta_
 
+        _, ta = tf.while_loop(cond, body, loop_vars=[tf.constant(0, tf.int32), ta], parallel_iterations=1)
+
         # Reconstruct reference points: [B, S, L, 2]
         reference_points = tf.transpose(ta.concat(), [1, 0, 2])
         valid_ratios_wh = valid_ratios[:, tf.newaxis, :, ::-1]

@@ -13,7 +13,6 @@ import cv2
 import random
 
 from config import Mask2FormerConfig
-from coco_dataset import create_coco_tf_dataset
 from coco_dataset_optimized import create_coco_tfrecord_dataset
 import shutil
 
@@ -169,25 +168,14 @@ if __name__ == '__main__':
     num_classes = len(coco_classes)
     img_height, img_width = cfg.img_height, cfg.img_width
 
-    if cfg.use_optimized_dataset:
-        ds = create_coco_tfrecord_dataset(
-            train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
-            target_size=(img_height, img_width),
-            batch_size=cfg.batch_size,
-            scale=cfg.image_scales[0],
-            augment=cfg.augment,
-            shuffle_buffer_size=cfg.shuffle_buffer_size,
-            number_images=cfg.number_images)
-    else:
-        ds = create_coco_tf_dataset(
-            coco_annotation_file=cfg.train_annotation_path,
-            coco_img_dir=cfg.images_path,
-            target_size=(img_height, img_width),
-            batch_size=cfg.batch_size,
-            scale=cfg.image_scales[0],
-            augment=False,
-            number_images=cfg.number_images
-        )
+    ds = create_coco_tfrecord_dataset(
+        train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
+        target_size=(img_height, img_width),
+        batch_size=cfg.batch_size,
+        scale=cfg.image_scales[0],
+        augment=cfg.augment,
+        shuffle_buffer_size=cfg.shuffle_buffer_size,
+        number_images=cfg.number_images)
 
     out_dir = 'images/dataset_test'
     shutil.rmtree(out_dir, ignore_errors=True)
