@@ -7,7 +7,6 @@ Description: This script contains classes and functions of COCO dataset optimize
 
 import os
 from typing import Optional, Tuple
-from coco_dataset import compute_scale_ranges
 
 import tensorflow as tf
 
@@ -31,6 +30,24 @@ _FEATURES = {
     "image/object/iscrowd": tf.io.VarLenFeature(tf.int64),
     "image/object/mask_png": tf.io.VarLenFeature(tf.string),
 }
+
+def get_classes(classes_path):
+    """
+    Loads class names from a text file.
+
+    Each line in the file is assumed to represent a single class name.
+    The function reads all lines, strips whitespace, and returns a list of class names.
+
+    Args:
+        classes_path (str): Path to the text file containing class names, one per line.
+
+    Returns:
+        List[str]: A list of class names as strings, with leading and trailing whitespace removed.
+    """
+    with open(classes_path) as f:
+        class_names = f.readlines()
+    class_names = [c.strip() for c in class_names]
+    return class_names
 
 def sparse_to_dense_1d(v, dtype):
     """

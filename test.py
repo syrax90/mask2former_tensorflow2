@@ -8,13 +8,12 @@ import cv2
 import os
 import random
 
-import keras.models
 import numpy as np
 import tensorflow as tf
 from pycocotools.coco import COCO
 
 from config import Mask2FormerConfig
-from coco_dataset import get_classes
+from coco_dataset_optimized import get_classes
 from model_functions import Mask2FormerModel
 import logging
 

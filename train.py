@@ -10,8 +10,7 @@ import logging
 import re
 import tensorflow as tf
 import tensorflow.keras.layers as layers
-from coco_dataset import create_coco_tf_dataset, get_classes
-from coco_dataset_optimized import create_coco_tfrecord_dataset
+from coco_dataset_optimized import create_coco_tfrecord_dataset, get_classes
 from config import Mask2FormerConfig
 from model_functions import Mask2FormerModel
 from loss import compute_multiscale_loss
@@ -297,25 +296,14 @@ if __name__ == '__main__':
         exit(0)
 
     # Form COCO dataset
-    if cfg.use_optimized_dataset:
-        ds = create_coco_tfrecord_dataset(
-            train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
-            target_size=(img_height, img_width),
-            batch_size=cfg.batch_size,
-            scale=cfg.image_scales[0],
-            augment=cfg.augment,
-            shuffle_buffer_size=cfg.shuffle_buffer_size,
-            number_images=cfg.number_images)
-    else:
-        ds = create_coco_tf_dataset(
-            coco_annotation_file=cfg.train_annotation_path,
-            coco_img_dir=cfg.images_path,
-            target_size=(img_height, img_width),
-            batch_size=cfg.batch_size,
-            scale=cfg.image_scales[0],
-            number_images=cfg.number_images,
-            augment=cfg.augment
-        )
+    ds = create_coco_tfrecord_dataset(
+        train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
+        target_size=(img_height, img_width),
+        batch_size=cfg.batch_size,
+        scale=cfg.image_scales[0],
+        augment=cfg.augment,
+        shuffle_buffer_size=cfg.shuffle_buffer_size,
+        number_images=cfg.number_images)
 
     #optimizer = tf.keras.optimizers.SGD(learning_rate=cfg.lr, momentum=0.9)
     optimizer = tf.keras.optimizers.AdamW(learning_rate=cfg.lr, weight_decay=0.05)
