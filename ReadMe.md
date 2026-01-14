@@ -1,25 +1,25 @@
-# Dynamic SOLO (SOLOv2) with TensorFlow
+# Mask2Former with TensorFlow
 
-This project is an implementation of <strong>Dynamic SOLO (SOLOv2)</strong> using the TensorFlow framework. The goal is to provide a clear explanation of how Dynamic SOLO works and demonstrate how the model can be implemented with TensorFlow.  
+This project is an implementation of **Mask2Former** using the TensorFlow framework. The goal is to provide a clear explanation of how Mask2Former works and demonstrate how the model can be implemented with TensorFlow.
 
 ## About SOLO
 
-SOLO (Segmenting Objects by Locations) is a model designed for computer vision tasks, specifically instance segmentation.
-> [**SOLO: A Simple Framework for Instance Segmentation**](https://arxiv.org/abs/2106.15947),  
-> Xinlong Wang, Rufeng Zhang, Chunhua Shen, Tao Kong, Lei Li  
-> *arXiv preprint ([arXiv:2106.15947](https://arxiv.org/abs/2106.15947))*  
+Mask2Former is a model designed for computer vision tasks, specifically instance segmentation.
+> [**Masked-attention Mask Transformer for Universal Image Segmentation**](https://arxiv.org/abs/2112.01527),
+> Bowen Cheng, Ishan Misra, Alexander G. Schwing, Alexander Kirillov, Rohit Girdhar
+> *arXiv preprint ([arXiv:2112.01527](https://arxiv.org/abs/2112.01527))*
 
 To understand instance segmentation better, consider the example below, where multiple objects—whether of the same or different classes—are identified as separate instances, each with its own segmentation mask (and the probability of belonging to a certain class):   
 
 ![Instance segmentation picture](images/readme/my_photo_with_masks.png)  
 
-This project implements the <strong>Dynamic SOLO (SOLOv2)</strong> variant:  
+This project implements the **Mask2Former** variant:
 
-![Dynanic SOLO plot](images/readme/dynamic_solo_plot_my_photo.png)
+![Mask2Former plot](images/readme/dynamic_solo_plot_my_photo.png)
 
 ## Who This Project is For
 
-It is primarily intended for educational purposes—especially for individuals without high-performance GPUs who are interested in learning about computer vision and the SOLO model. We chose TensorFlow to make the implementation accessible. The code is thoroughly documented to ensure clarity and ease of understanding. However, the code is well optimized for use in production-ready tasks.
+It is primarily intended for educational purposes—especially for individuals without high-performance GPUs who are interested in learning about computer vision and the Mask2Former model. We chose TensorFlow to make the implementation accessible. The code is thoroughly documented to ensure clarity and ease of understanding. However, the code is well optimized for use in production-ready tasks.
 
 ## Installation, Dependencies, and Requirements
 
@@ -53,7 +53,7 @@ self.tfrecord_dataset_directory_path = 'path/to/tfrecords/directory'
 
 ## Configuration
 
-All configuration parameters are defined in `config.py` file within the `DynamicSOLOConfig` class.
+All configuration parameters are defined in `config.py` file within the `Mask2FormerConfig` class.
 
 Set the path to your COCO dataset:  
 

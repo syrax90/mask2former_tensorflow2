@@ -1,0 +1,27 @@
+# Virtualenv
+/.venv/
+/venv/
+
+.idea/
+.vscode/
+.data/
+.weights/
+.debug/
+.temp/
+.images/
+.antigravity/
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+.ipynb_checkpoints/
+
+images/*
+images/test/*
+weights/*
+/archives/
+/data/coco_classes.txt
+
+
+# exceptions
+!images/readme
+!images/test

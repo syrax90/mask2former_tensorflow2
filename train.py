@@ -12,7 +12,7 @@ import tensorflow as tf
 import tensorflow.keras.layers as layers
 from coco_dataset import create_coco_tf_dataset, get_classes
 from coco_dataset_optimized import create_coco_tfrecord_dataset
-from config import DynamicSOLOConfig
+from config import Mask2FormerConfig
 from model_functions import Mask2FormerModel
 from loss import compute_multiscale_loss
 
@@ -36,13 +36,14 @@ os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 def extract_epoch_number(file_name):
     """
     Extract the epoch number from a saved Keras weight filename.
+
     Expects filenames that match the pattern `"...epoch{N}.keras"`.
 
     Args:
-      file_name (str): Filename to parse, e.g. `"solo_epoch00000042.keras"`.
+        file_name (str): Filename to parse, e.g. `"mask2former_epoch00000001.keras"`.
 
     Returns:
-      int: The extracted epoch number.
+        int: The extracted epoch number.
     """
     return int(re.search(r'epoch(\d+)\.keras', file_name).group(1))
 
@@ -54,22 +55,14 @@ def train_one_epoch(model, dataset, optimizer, num_classes):
     per-step metrics.
 
     Args:
-      model (tf.keras.Model): SOLO model whose forward pass returns
-        `(class_outputs, mask_outputs, mask_feat)`, where:
-          * `class_outputs`: `[B, sum(S_i^2) num_classes]`
-          * `mask_outputs`: `[B, sum(S_i^2), D]`
-          * `mask_feat`: `[B, H, W, D]`
-        (`S` varies per FPN scale; `D` is the mask feature dimension).
-      dataset (tf.data.Dataset): Yields triples
-        `(images, cate_target, mask_target)` per step where:
-          * `images`: tf.float32, `[B, H, W, 3]`.
-          * `cate_target` (aka `class_target`): tf.int32 class indices per grid cell, `[B, sum(S_i^2)]`.
-          * `mask_target`: tf.uint8 GT masks aligned to grid cells, `[B, H, W, sum(S_i^2)]`.
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer to update weights.
-      num_classes (int): Number of object classes (background excluded).
+        model (tf.keras.Model): Mask2Former model whose forward pass returns
+            `(class_outputs, mask_outputs, mask_feat)` for various scales/features.
+        dataset (tf.data.Dataset): Yields triples `(images, cate_target, mask_target)` per step.
+        optimizer (tf.keras.optimizers.Optimizer): Optimizer to update weights.
+        num_classes (int): Number of object classes (background excluded).
 
     Returns:
-      None
+        None
     """
     for step, (images, cate_target, mask_target)  in enumerate(dataset):
         total_loss, cate_loss, dice_loss, mask_loss = train_one_step(model, images, cate_target, mask_target, optimizer, num_classes)
@@ -80,27 +73,23 @@ def train_one_step(model, images, cate_target, mask_target, optimizer, num_class
     """
     Perform a single optimization step (no accumulation).
 
-    Runs a forward pass, computes multiscale SOLO losses, backpropagates, and
+    Runs a forward pass, computes multiscale Mask2Former losses, backpropagates, and
     applies gradients.
 
     Args:
-      model (tf.keras.Model): SOLO model producing:
-        * `class_outputs`: `[B, sum(S_i^2), num_classes]`
-        * `mask_outputs`: `[B, sum(S_i^2), D]`
-        * `mask_feat`: `[B, H, W, D]`.
-      images (tf.Tensor): float32 input images, `[B, H, W, 3]`.
-      cate_target (tf.Tensor): Class indices per grid cell (a.k.a.
-        `class_target`), `[B, sum(S_i^2)]`.
-      mask_target (tf.Tensor): GT masks aligned to grid cells,
-        `[B, H, W, sum(S_i^2)]`.
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
-      num_classes (int | tf.Tensor): Number of classes (background excluded).
+        model (tf.keras.Model): Mask2Former model producing class outputs, mask outputs and features.
+        images (tf.Tensor): float32 input images, `[B, H, W, 3]`.
+        cate_target (tf.Tensor): Class indices per grid cell (a.k.a. `class_target`), `[B, sum(S_i^2)]`.
+        mask_target (tf.Tensor): GT masks aligned to grid cells, `[B, H, W, sum(S_i^2)]`.
+        optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
+        num_classes (int): Number of classes (background excluded).
 
     Returns:
-      Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        * `total_loss`: scalar total loss.
-        * `cate_loss`: scalar classification (focal) loss.
-        * `mask_loss`: scalar mask (Dice) loss.
+        tuple: A tuple containing:
+            - total_loss (tf.Tensor): Scalar total loss.
+            - cate_loss (tf.Tensor): Scalar classification (focal) loss.
+            - dice_loss (tf.Tensor): Scalar mask (Dice) loss.
+            - mask_loss (tf.Tensor): Scalar mask (CE) loss.
     """
     with tf.GradientTape() as tape:
         pred_logits, pred_masks, aux_outputs = model(images, training=True)
@@ -123,24 +112,23 @@ def accumulate_one_step(model,
     """
     Accumulate gradients for one mini-batch (no optimizer step).
 
-    Computes SOLO multiscale losses and adds gradients into preallocated
+    Computes Mask2Former multiscale losses and adds gradients into preallocated
     buffers to enable gradient accumulation across multiple steps.
 
     Args:
-      model (tf.keras.Model): SOLO model producing:
-        * `class_outputs`: `[B, sum(S_i^2), num_classes]`
-        * `mask_outputs`: `[B, sum(S_i^2), D]`
-      images (tf.Tensor): float32 `[B, H, W, 3]`.
-      cate_target (tf.Tensor): Class indices `[B, sum(S_i^2)]`.
-      mask_target (tf.Tensor): GT masks `[B, H, W, sum(S_i^2)]`.
-      num_classes (int | tf.Tensor): Number of classes (background excluded).
-      accum_grads (List[tf.Variable]): Zero-initialized gradient buffers, one per entry in `model.trainable_variables`; same shapes/dtypes.
+        model (tf.keras.Model): Mask2Former model producing class outputs and mask outputs.
+        images (tf.Tensor): float32 `[B, H, W, 3]`.
+        cate_target (tf.Tensor): Class indices `[B, sum(S_i^2)]`.
+        mask_target (tf.Tensor): GT masks `[B, H, W, sum(S_i^2)]`.
+        num_classes (int): Number of classes (background excluded).
+        accum_grads (list): Zero-initialized gradient buffers (tf.Variable),
+            one per entry in `model.trainable_variables`; same shapes/dtypes.
 
     Returns:
-      Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        * `total_l`: scalar total loss.
-        * `cate_l`: scalar classification loss.
-        * `mask_l`: scalar mask loss.
+        tuple: A tuple containing:
+            - total_l (tf.Tensor): Scalar total loss.
+            - cate_l (tf.Tensor): Scalar classification loss.
+            - mask_l (tf.Tensor): Scalar mask loss.
     """
     with tf.GradientTape() as tape:
         pred_logits, pred_masks, aux_outputs = model(images, training=True)
@@ -153,7 +141,7 @@ def accumulate_one_step(model,
 
     grads = tape.gradient(total_l, model.trainable_variables)
 
-    # add to buffers
+    # Add to buffers
     for g_acc, g in zip(accum_grads, grads):
         if g is not None:
             g_acc.assign_add(g)
@@ -172,33 +160,26 @@ def train_one_epoch_accumulated_mode(model,
     """
     Run one epoch with gradient accumulation using preallocated buffers.
 
-    For each batch, compute SOLO multiscale losses and add gradients to
+    For each batch, compute Mask2Former multiscale losses and add gradients to
     `accum_grads`. Apply an optimizer step every `accumulation_steps` by
     dividing buffered grads by `accumulation_steps` and resetting buffers.
     Any leftover buffered grads at epoch end are cleared (no update).
 
     Args:
-      model (tf.keras.Model): SOLO model producing:
-        * `class_outputs`: `[B, sum(S_i^2), num_classes]`
-        * `mask_outputs`: `[B, sum(S_i^2), D]`
-        * `mask_feat`: `[B, H, W, D]`.
-      dataset (tf.data.Dataset): Yields
-        `(images, cate_target, mask_target)` with shapes:
-        * `images`: `[B, H, W, 3]` (float32)
-        * `cate_target`: `[B, sum(S_i^2)]`
-        * `mask_target`: `[B, H, W, sum(S_i^2)]`.
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
-      num_classes (int | tf.Tensor): Number of classes (background excluded).
-      accumulation_steps (int): Number of mini-batches to accumulate.
-      accum_grads (List[tf.Variable]): Gradient buffers (zeros, same shapes as `model.trainable_variables`).
-      accum_counter (tf.Variable): int32 counter tracking steps since last apply.
-      global_step (tf.Variable): int32 counter of total steps in the epoch.
+        model (tf.keras.Model): Mask2Former model producing class outputs, mask outputs and features.
+        dataset (tf.data.Dataset): Yields `(images, cate_target, mask_target)`.
+        optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
+        num_classes (int): Number of classes (background excluded).
+        accumulation_steps (int): Number of mini-batches to accumulate.
+        accum_grads (list): Gradient buffers (tf.Variable), zeros, same shapes as `model.trainable_variables`.
+        accum_counter (tf.Variable): int32 counter tracking steps since last apply.
+        global_step (tf.Variable): int32 counter of total steps in the epoch.
 
     Returns:
-      None
+        None
     """
 
-    # helper: apply optimiser + reset buffers
+    # Helper: apply optimizer and reset buffers
     def _apply_and_reset(denominator):
         scaled = [g / tf.cast(denominator, g.dtype) for g in accum_grads]
         optimizer.apply_gradients(zip(scaled, model.trainable_variables))
@@ -227,7 +208,7 @@ def train_one_epoch_accumulated_mode(model,
                  "cate =", cat,
                  "mask =", msk)
 
-    # flush leftovers
+    # Flush leftovers
     tf.cond(accum_counter > 0,
             lambda: _reset_counter(),
             lambda: None)
@@ -244,32 +225,26 @@ def run_one_epoch_accumulated_mode(model,
     calls :func:`train_one_epoch_accumulated_mode`.
 
     Args:
-      model (tf.keras.Model): SOLO model producing:
-        * `class_outputs`: `[B, sum(S_i^2), num_classes]`
-        * `mask_outputs`: `[B, sum(S_i^2), D]`
-      dataset (tf.data.Dataset): Yields
-        `(images, cate_target, mask_target)` with shapes:
-        * `images`: `[B, H, W, 3]` (float32)
-        * `cate_target`: `[B, sum(S_i^2)]`
-        * `mask_target`: `[B, H, W, sum(S_i^2)]`.
-      optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
-      num_classes (int): Number of classes (background excluded).
-      accumulation_steps (int, optional): Steps to accumulate before applying updates. Defaults to `8`.
+        model (tf.keras.Model): Mask2Former model producing class outputs and mask outputs.
+        dataset (tf.data.Dataset): Yields `(images, cate_target, mask_target)`.
+        optimizer (tf.keras.optimizers.Optimizer): Optimizer instance.
+        num_classes (int): Number of classes (background excluded).
+        accumulation_steps (int, optional): Steps to accumulate before applying updates. Defaults to `8`.
 
     Returns:
-      None
+        None
     """
-    # gradient buffers (one per trainable weight)
+    # Gradient buffers (one per trainable weight)
     accum_grads = [
         tf.Variable(tf.zeros_like(v), trainable=False)
         for v in model.trainable_variables
     ]
 
-    # counters
+    # Counters
     accum_counter = tf.Variable(0, dtype=tf.int32, trainable=False)
     global_step   = tf.Variable(0, dtype=tf.int32, trainable=False)
 
-    # run the compiled graph
+    # Run the compiled graph
     train_one_epoch_accumulated_mode(model,
                     dataset,
                     optimizer,
@@ -281,7 +256,7 @@ def run_one_epoch_accumulated_mode(model,
 
 
 if __name__ == '__main__':
-    cfg = DynamicSOLOConfig()
+    cfg = Mask2FormerConfig()
 
     class_names = get_classes(cfg.classes_path)
     num_classes = len(class_names)
@@ -289,7 +264,7 @@ if __name__ == '__main__':
     img_height, img_width = cfg.img_height, cfg.img_width
 
     previous_epoch = 0
-    # load previous model if load_previous_model = True
+    # Load previous model if load_previous_model = True
     load_previous_model = cfg.load_previous_model
     if load_previous_model:
         # Create a model instance because of NGC's TensorFlow version
@@ -337,7 +312,6 @@ if __name__ == '__main__':
             coco_img_dir=cfg.images_path,
             target_size=(img_height, img_width),
             batch_size=cfg.batch_size,
-            grid_sizes=cfg.grid_sizes,
             scale=cfg.image_scales[0],
             number_images=cfg.number_images,
             augment=cfg.augment
@@ -354,7 +328,6 @@ if __name__ == '__main__':
             run_one_epoch_accumulated_mode(model, ds, optimizer, num_classes, accumulation_steps=cfg.accumulation_steps)
         else:
             train_one_epoch(model, ds, optimizer, num_classes)
-        # ==================== save ====================
         if epoch != 0 and epoch % cfg.save_iter == 0:
             save_path = f'./weights/{cfg.model_weights_prefix}_epoch%.8d.keras' % epoch
             model.save(save_path)

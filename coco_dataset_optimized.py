@@ -45,28 +45,24 @@ def sparse_to_dense_1d(v, dtype):
     """
     return tf.cast(tf.sparse.to_dense(v), dtype)
 
-# -----------------------------
-# Data augmentations (graph mode, TF-only)
-# -----------------------------
+# Data augmentations
+
 def maybe_hflip(img, masks, bboxes):
     """
     Randomly applies a horizontal flip to image, masks, and boxes (p=0.5).
 
+    Boxes are mirrored around the image center by updating x: `x' = W - x - w`.
+
     Args:
-      img: Tensor [H, W, C] (uint8). Image.
-      masks: Tensor [N, H, W] (uint8). Per-instance binary masks aligned to `img`.
-      bboxes: Tensor [N, 4] (float32). Boxes in (x, y, w, h) format in the same
-        coordinate space as `img`.
+        img (tf.Tensor): Image tensor [H, W, C] (uint8).
+        masks (tf.Tensor): Per-instance binary masks aligned to `img`, [N, H, W] (uint8).
+        bboxes (tf.Tensor): Boxes in (x, y, w, h) format in the same coordinate space as `img`, [N, 4] (float32).
 
     Returns:
-      Tuple[Tensor, Tensor, Tensor]:
-        - img_f: Tensor [H, W, C] (uint8). Possibly flipped image.
-        - masks_f: Tensor [N, H, W] (uint8). Possibly flipped masks.
-        - b_new: Tensor [N, 4] (float32). Updated boxes after flip.
-
-    Notes:
-      * Applies with probability 0.5.
-      * Boxes are mirrored around the image center by updating x: `x' = W - x - w`.
+        tuple: A tuple containing:
+            - img_f (tf.Tensor): Possibly flipped image [H, W, C] (uint8).
+            - masks_f (tf.Tensor): Possibly flipped masks [N, H, W] (uint8).
+            - b_new (tf.Tensor): Updated boxes after flip [N, 4] (float32).
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
     def yes():
@@ -88,15 +84,13 @@ def maybe_brightness(img):
     """
     Randomly jitters brightness by a multiplicative factor in [-20%, +20%] (p=0.5).
 
+    The factor is sampled uniformly from [0.8, 1.2] and values are clipped to [0, 255].
+
     Args:
-      img: Tensor [H, W, C] (uint8). Image in range [0, 255].
+        img (tf.Tensor): Image in range [0, 255], [H, W, C] (uint8).
 
     Returns:
-      Tensor: Image of shape [H, W, C] (uint8) with brightness possibly adjusted.
-
-    Notes:
-      * Applies with probability 0.5.
-      * The factor is sampled uniformly from [0.8, 1.2] and values are clipped to [0, 255].
+        tf.Tensor: Image of shape [H, W, C] (uint8) with brightness possibly adjusted.
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
     def yes():
@@ -114,21 +108,18 @@ def maybe_scale(img, masks, bboxes):
 
     The scale factor `s` is sampled from [0.8, 1.2]. Images are resized with bilinear
     interpolation; masks use nearest neighbor. Boxes are scaled by `s`.
+    Image values are clipped to [0, 255] after bilinear resize and rounding.
 
     Args:
-      img: Tensor [H, W, C] (uint8). Input image.
-      masks: Tensor [N, H, W] (uint8). Per-instance masks aligned with `img`.
-      bboxes: Tensor [N, 4] (float32). Boxes (x, y, w, h) in `img` coordinates.
+        img (tf.Tensor): Input image [H, W, C] (uint8).
+        masks (tf.Tensor): Per-instance masks aligned with `img` [N, H, W] (uint8).
+        bboxes (tf.Tensor): Boxes (x, y, w, h) in `img` coordinates [N, 4] (float32).
 
     Returns:
-      Tuple[Tensor, Tensor, Tensor]:
-        - img_rs: Tensor [⌊H*s⌉, ⌊W*s⌉, C] (uint8). Resized image.
-        - masks_rs: Tensor [N, ⌊H*s⌉, ⌊W*s⌉] (uint8). Resized masks.
-        - b_new: Tensor [N, 4] (float32). Scaled boxes.
-
-    Notes:
-      * Applies with probability 0.5.
-      * Image values are clipped to [0, 255] after bilinear resize and rounding.
+        tuple: A tuple containing:
+            - img_rs (tf.Tensor): Resized image [⌊H*s⌉, ⌊W*s⌉, C] (uint8).
+            - masks_rs (tf.Tensor): Resized masks [N, ⌊H*s⌉, ⌊W*s⌉] (uint8).
+            - b_new (tf.Tensor): Scaled boxes [N, 4] (float32).
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
     def yes():
@@ -171,21 +162,17 @@ def maybe_random_crop(img, masks, bboxes, cat_ids):
     aligned with the filtered boxes.
 
     Args:
-      img: Tensor [H, W, C] (uint8). Input image.
-      masks: Tensor [N, H, W] (uint8). Per-instance masks.
-      bboxes: Tensor [N, 4] (float32). Boxes (x, y, w, h) in image coords.
-      cat_ids: Tensor [N] (int32). Category id per instance.
+        img (tf.Tensor): Input image [H, W, C] (uint8).
+        masks (tf.Tensor): Per-instance masks [N, H, W] (uint8).
+        bboxes (tf.Tensor): Boxes (x, y, w, h) in image coords [N, 4] (float32).
+        cat_ids (tf.Tensor): Category id per instance [N] (int32).
 
     Returns:
-      Tuple[Tensor, Tensor, Tensor, Tensor]:
-        - img_cr: Tensor [Hc, Wc, C] (uint8). Cropped image.
-        - m_new: Tensor [N', Hc, Wc] (uint8). Cropped masks for kept instances.
-        - b_new: Tensor [N', 4] (float32). Boxes translated/clipped to the crop.
-        - c_new: Tensor [N'] (int32). Category ids for kept instances.
-
-    Notes:
-      * Applies with probability 0.5.
-      * Keeps only boxes with width > 1 and height > 1 in pixels after cropping.
+        tuple: A tuple containing:
+            - img_cr (tf.Tensor): Cropped image [Hc, Wc, C] (uint8).
+            - m_new (tf.Tensor): Cropped masks for kept instances [N', Hc, Wc] (uint8).
+            - b_new (tf.Tensor): Boxes translated/clipped to the crop [N', 4] (float32).
+            - c_new (tf.Tensor): Category ids for kept instances [N'] (int32).
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
     def yes():
@@ -243,40 +230,26 @@ def parse_example(
         scale,
         augment):
     """
-    Parses one TFRecord example and builds multi-scale SOLO training targets.
+    Parses one TFRecord example and builds multi-scale Mask2Former training targets.
 
-    This function:
-      * Parses a single serialized example using `_FEATURES`.
-      * Decodes the image (to RGB if needed) and per-instance masks (PNG).
-      * Optionally applies augmentations (flip, brightness, random crop).
-      * Resizes image to `(target_height, target_width)` and masks via nearest.
-      * Scales boxes to the resized image coordinate frame.
-      * For each SOLO grid size and its corresponding `scale_range`, generates
-        per-scale targets via `generate_solo_targets_single_scale`, then
-        concatenates category targets (flattened per scale) and mask targets
-        (concatenated along channel axis).
+    This function parses a single serialized example, decodes the image and per-instance masks,
+    optionally applies augmentations (flip, brightness, random crop), resizes the image and masks,
+    scales boxes, and generates per-scale targets.
+    It then concatenates category targets (flattened per scale) and mask targets
+    (concatenated along channel axis).
 
     Args:
-      serialized: Scalar string Tensor. A single serialized `tf.train.Example`.
-      target_height: Scalar int. Output image height.
-      target_width: Scalar int. Output image width.
-      scale: Scalar float. Feature-map downscale (e.g., 0.25 -> 1/4).
-        sqrt(area) gating.
-      augment: Scalar bool. If True, apply data augmentations.
+        serialized (tf.Tensor): Scalar string Tensor. A single serialized `tf.train.Example`.
+        target_height (int): Output image height.
+        target_width (int): Output image width.
+        scale (float): Feature-map downscale factor (e.g., 0.25 -> 1/4) for sqrt(area) gating.
+        augment (bool): If True, apply data augmentations.
 
     Returns:
-      Tuple[Tensor, Tensor, Tensor]:
-        - image_resized: Tensor [target_height, target_width, 3] (float32) in [0, 1].
-        - cate_targets: Tensor [sum(S_i^2)] (int32). Concatenated category
-          targets from all scales, flattened per scale then concatenated.
-        - mask_targets: Tensor [Hf, Wf, sum(S_i^2)] (uint8). Concatenated
-          per-cell masks across all scales. Hf/Wf match the feature size for the
-          provided `scale`.
-
-    Notes:
-      * If there are zero instances, shapes are still well-defined: category
-        targets will be a concatenation of -1-filled grids; mask targets will be
-        all zeros.
+        tuple: A tuple containing:
+            - image_resized (tf.Tensor): Resized image [target_height, target_width, 3] (float32) in [0, 1].
+            - cate_targets (tf.Tensor): Concatenated category targets from all scales [sum(S_i^2)] (int32).
+            - mask_targets (tf.Tensor): Concatenated per-cell masks across all scales [Hf, Wf, sum(S_i^2)] (uint8).
     """
 
     ex = tf.io.parse_single_example(serialized, _FEATURES)
@@ -340,8 +313,7 @@ def parse_example(
     # Convert to float32 in [0, 1]
     image_resized = tf.cast(image_resized, tf.float32) / 255.0
 
-    # resize masks to (target_height, target_width) using nearest neighbor ===
-    # Vectorized resize over batch dimension; works even if N == 0.
+    # Resize masks to (target_height, target_width) using nearest neighbor
     target_mask_height = tf.cast(tf.round(target_height * scale), tf.int32)
     target_mask_width = tf.cast(tf.round(target_width * scale), tf.int32)
     masks_resized = tf.image.resize(
@@ -368,32 +340,33 @@ def create_coco_tfrecord_dataset(
     shuffle_buffer_size: Optional[int] = None,
     number_images: Optional[int] = None
 ) -> tf.data.Dataset:
-    """Creates a `tf.data.Dataset` from COCO TFRecord shards and emits SOLO targets.
+    """
+    Creates a `tf.data.Dataset` from COCO TFRecord shards and emits Mask2Former targets.
 
-    This utility:
-      * Scans a directory for `*.tfrecord` shards.
-      * Builds a streaming `TFRecordDataset`.
-      * Optionally shuffles and/or limits the number of examples.
-      * Parses each example and constructs multi-scale SOLO targets via `parse_example`.
-      * Batches and prefetches the dataset.
+    This utility scans a directory for `*.tfrecord` shards, builds a streaming `TFRecordDataset`,
+    optionally shuffles and/or limits the number of examples, parses each example,
+    constructs multi-scale Mask2Former targets, and batches/prefetches the dataset.
 
     Args:
-      train_tfrecord_directory: Path to directory containing TFRecord shards.
-      target_size: Tuple[int, int]. Target (height, width) for image & mask resizing.
-      batch_size: Batch size for the resulting dataset.
-      scale: Float. Feature-map scale factor used in target generation (e.g., 2.5).
-        Note: This is later passed to `parse_example` which expects a downscale
-        factor (e.g., 0.25); ensure consistency with your pipeline.
-      deterministic: If False (default), allow non-deterministic map parallelism.
-      augment: If True (default), apply data augmentations in `parse_example`.
-      shuffle_buffer_size: Optional shuffle buffer size. If provided, shuffling is enabled.
-      number_images: Optional cap on the number of images to take from the stream.
+        train_tfrecord_directory (str): Path to directory containing TFRecord shards.
+        target_size (tuple): Target (height, width) for image & mask resizing.
+        batch_size (int): Batch size for the resulting dataset.
+        scale (float, optional): Feature-map scale factor used in target generation (e.g., 2.5).
+            Defaults to 2.5.
+        deterministic (bool, optional): If False, allow non-deterministic map parallelism.
+            Defaults to False.
+        augment (bool, optional): If True, apply data augmentations in `parse_example`.
+            Defaults to True.
+        shuffle_buffer_size (int, optional): Optional shuffle buffer size. If provided, shuffling is enabled.
+            Defaults to None.
+        number_images (int, optional): Optional cap on the number of images to take from the stream.
+            Defaults to None.
 
     Returns:
-      tf.data.Dataset: A dataset of batched tuples:
-        - image_resized: [B, Ht, Wt, 3] (float32) in [0, 1]
-        - cate_targets: [B, sum(S_i^2)] (int32)
-        - mask_targets: [B, Hf, Wf, sum(S_i^2)] (uint8)
+        tf.data.Dataset: A dataset of batched tuples:
+            - image_resized (tf.Tensor): [B, Ht, Wt, 3] (float32) in [0, 1].
+            - cate_targets (tf.Tensor): [B, sum(S_i^2)] (int32).
+            - mask_targets (tf.Tensor): [B, Hf, Wf, sum(S_i^2)] (uint8).
     """
     target_height, target_width = target_size
     augment_tf = tf.constant(augment)

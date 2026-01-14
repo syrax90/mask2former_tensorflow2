@@ -5,7 +5,14 @@ Description: This script contains configurations.
 """
 
 
-class DynamicSOLOConfig(object):
+class Mask2FormerConfig(object):
+    """
+    Configuration class for Mask2Former model parameters and paths.
+
+    This class holds all necessary configuration settings for data loading,
+    model training, and testing, including file paths, image dimensions,
+    hyperparameters, and dataset options.
+    """
     def __init__(self):
         self.coco_root_path = '/home/syrax/ml/datasets/Cocodataset2017'
         self.train_annotation_path = f'{self.coco_root_path}/annotations/instances_train2017.json'
@@ -32,7 +39,6 @@ class DynamicSOLOConfig(object):
         # Model weights file prefix
         self.model_weights_prefix = 'coco'
 
-        self.grid_sizes = [20, 18, 12, 8]
         self.image_scales = [0.25]
         self.augment = True
 
@@ -45,6 +51,5 @@ class DynamicSOLOConfig(object):
         self.accumulation_steps = 8
 
         # Dataset options
-        self.use_optimized_dataset = True  # Use TFRecord dataset for training if True
         self.tfrecord_dataset_directory_path = f'{self.coco_root_path}/tfrecords/train'  # Path to TFRecord dataset directory
         self.shuffle_buffer_size = 4096  # TFRecord dataset shuffle buffer size. Set to None to disable shuffling

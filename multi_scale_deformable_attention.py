@@ -10,16 +10,17 @@ import math
 
 def bilinear_sample_nhwc(images, x_norm, y_norm):
     """
-    Bilinear sampling on NHWC images (TensorFlow native layout).
+    Performs bilinear sampling on NHWC images (TensorFlow native layout).
+
     Optimized to remove redundant transposes.
 
     Args:
-        images: Tensor, [B, H, W, C] (Note: Channels Last)
-        x_norm: Tensor, [B, Lq, P]
-        y_norm: Tensor, [B, Lq, P]
+        images (tf.Tensor): Input images of shape [B, H, W, C] (Channels Last).
+        x_norm (tf.Tensor): Normalized x coordinates of shape [B, Lq, P].
+        y_norm (tf.Tensor): Normalized y coordinates of shape [B, Lq, P].
 
     Returns:
-        Tensor of shape [B, Lq, P, C] -> Transposed to [B, C, Lq, P] at end to match output signature
+        tf.Tensor: Sampled values of shape [B, C, Lq, P].
     """
     images = tf.convert_to_tensor(images)
     x_norm = tf.convert_to_tensor(x_norm, dtype=tf.float32)
@@ -102,7 +103,19 @@ def bilinear_sample_nhwc(images, x_norm, y_norm):
 def ms_deform_attn_core_tf(value, value_spatial_shapes, sampling_locations,
                            attention_weights, n_levels):
     """
-    Optimized Core: Keeps 'value' in NHWC format to avoid transposes.
+    Core multi-scale deformable attention computation.
+
+    Optimized to keep 'value' in NHWC format to avoid transposes.
+
+    Args:
+        value (tf.Tensor): Value features of shape [N, S, M, D_head].
+        value_spatial_shapes (tf.Tensor): Spatial shapes of each level, shape [L, 2].
+        sampling_locations (tf.Tensor): Sampling locations of shape [N, Lq, M, L, P, 2].
+        attention_weights (tf.Tensor): Attention weights of shape [N, Lq, M, L, P].
+        n_levels (int): Number of feature levels.
+
+    Returns:
+        tf.Tensor: Output features of shape [N, Lq, M*D_head].
     """
     value = tf.convert_to_tensor(value)
     value_spatial_shapes = tf.cast(value_spatial_shapes, tf.int32)
@@ -168,7 +181,22 @@ def ms_deform_attn_core_tf(value, value_spatial_shapes, sampling_locations,
 
 class MSDeformAttn(tf.keras.layers.Layer):
     """
-    Same Class structure, using the optimized core functions.
+    Multi-Scale Deformable Attention Layer.
+
+    Applies the deformable attention mechanism across multiple feature levels,
+    enabling the model to attend to sparse spatial locations determined by
+    learnable offsets.
+
+    Args:
+        d_model (int): Model dimension. Defaults to 256.
+        n_levels (int): Number of feature levels. Defaults to 4.
+        n_heads (int): Number of attention heads. Defaults to 8.
+        n_points (int): Number of sampling points per head per level. Defaults to 4.
+        reference_points_dim (int): Dimension of reference points (2 or 4). Defaults to 2.
+        **kwargs: Additional keyword arguments for the base Layer class.
+
+    Raises:
+        ValueError: If d_model is not divisible by n_heads or reference_points_dim is not 2 or 4.
     """
 
     def __init__(self, d_model=256, n_levels=4, n_heads=8, n_points=4,
@@ -187,6 +215,16 @@ class MSDeformAttn(tf.keras.layers.Layer):
         self.reference_points_dim = reference_points_dim
 
     def _sampling_offsets_bias_init(self, shape, dtype=None):
+        """
+        Initializes sampling offsets bias with a grid pattern.
+
+        Args:
+            shape (tuple): Shape of the bias tensor.
+            dtype (tf.DType, optional): Data type. Defaults to tf.float32.
+
+        Returns:
+            tf.Tensor: Initialized bias tensor.
+        """
         if dtype is None: dtype = tf.float32
         thetas = tf.cast(tf.range(self.n_heads), dtype) * (2.0 * math.pi / float(self.n_heads))
         grid = tf.stack([tf.cos(thetas), tf.sin(thetas)], axis=-1)
@@ -199,6 +237,12 @@ class MSDeformAttn(tf.keras.layers.Layer):
         return tf.cast(tf.reshape(grid, [-1]), dtype)
 
     def build(self, input_shape):
+        """
+        Builds the layer by creating trainable weights.
+
+        Args:
+            input_shape (tuple): Shape of the input tensor.
+        """
         self.sampling_offsets_kernel = self.add_weight(
             "sampling_offsets_kernel",
             shape=(self.d_model, self.n_heads * self.n_levels * self.n_points * 2),
@@ -234,6 +278,20 @@ class MSDeformAttn(tf.keras.layers.Layer):
 
     def call(self, query, reference_points, input_flatten, input_spatial_shapes,
              input_level_start_index=None, input_padding_mask=None):
+        """
+        Applies multi-scale deformable attention.
+
+        Args:
+            query (tf.Tensor): Query features of shape [N, Len_q, d_model].
+            reference_points (tf.Tensor): Reference points of shape [N, Len_q, n_levels, 2] or [N, Len_q, n_levels, 4].
+            input_flatten (tf.Tensor): Flattened input features of shape [N, Len_in, d_model].
+            input_spatial_shapes (tf.Tensor): Spatial shapes of each level, shape [n_levels, 2].
+            input_level_start_index (tf.Tensor, optional): Starting index for each level. Defaults to None.
+            input_padding_mask (tf.Tensor, optional): Padding mask. Defaults to None.
+
+        Returns:
+            tf.Tensor: Output features of shape [N, Len_q, d_model].
+        """
         query = tf.cast(query, tf.float32)
         reference_points = tf.cast(reference_points, tf.float32)
         input_flatten = tf.cast(input_flatten, tf.float32)

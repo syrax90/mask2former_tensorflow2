@@ -18,16 +18,18 @@ from pixel_decoder import MSDeformablePixelDecoder
 from transformer_decoder import TransformerDecoder
 
 
-# ---------------------------------------------------------------------
 # FPN-ResNet50 backbone
-# ---------------------------------------------------------------------
 
 def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
     """
     Builds a Feature Pyramid Network (FPN) on top of a ResNet50 backbone.
 
+    Args:
+        input_shape (tuple): Input image shape as (height, width, channels). Defaults to (480, 480, 3).
+        ouput_kernels_number (int): Number of output channels for each FPN level. Defaults to 256.
+
     Returns:
-        tf.keras.Model with inputs=image tensor and outputs=[p2, p3, p4, p5].
+        tf.keras.Model: Model with inputs=image tensor and outputs=[p2, p3, p4, p5] feature maps.
     """
     backbone = ResNet50(
         weights="imagenet", include_top=False, input_shape=input_shape
@@ -61,7 +63,7 @@ def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
         ]
     )
 
-    # Smoothing (3×3 convs)
+    # Smoothing convolutions
     p5 = Conv2D(
         ouput_kernels_number, (3, 3), padding="same", name="fpn_p5_smooth"
     )(p5)
@@ -78,20 +80,23 @@ def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
     return Model(inputs=backbone.input, outputs=[p2, p3, p4, p5], name="fpn_resnet50")
 
 
-# ---------------------------------------------------------------------
-# Mask2Former Head (class + mask prediction)
-# ---------------------------------------------------------------------
+# Mask2Former Head
 class Mask2FormerHead(Layer):
     """
     Mask2Former-style head on top of pixel features.
 
-    Inputs:
-        memory:        (B, HW, C)    flattened encoder/pixel features
-        mask_features: (B, Hm, Wm, C) per-pixel features used to generate masks
+    This layer processes flattened encoder features (memory) and per-pixel mask features
+    to generate final class logits and mask predictions using a Transformer decoder.
 
-    Outputs (all Tensors, graph-friendly):
-        pred_logits:      (B, num_queries, num_classes + 1)
-        pred_masks:       (B, num_queries, Hm, Wm)
+    Args:
+        num_classes (int): Number of object classes.
+        num_queries (int): Number of object queries. Defaults to 100.
+        d_model (int): Model dimension. Defaults to 256.
+        num_decoder_layers (int): Number of decoder layers. Defaults to 6.
+        num_heads (int): Number of attention heads. Defaults to 8.
+        dim_feedforward (int): Feed-forward dimension. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -123,34 +128,38 @@ class Mask2FormerHead(Layer):
             num_heads=num_heads, dim_feedforward=dim_feedforward,
             dropout=dropout, name="transformer_decoder",
         )
-        # Classification head and Mask embedding head
+        # Classification and mask embedding heads
         prior_prob = 0.01
         bias_value = -tf.math.log((1.0 - prior_prob) / prior_prob)
-
-        self.class_embed = Dense(num_classes + 1, name="class_embed", bias_initializer=tf.keras.initializers.Constant(bias_value))  # (includes "no object")
+        self.class_embed = Dense(num_classes + 1, name="class_embed", bias_initializer=tf.keras.initializers.Constant(bias_value))
         self.mask_embed = tf.keras.Sequential([
             Dense(d_model, activation="relu"), Dense(d_model)
         ], name="mask_embed_mlp")
 
     def call(self, memory_list, memory_pos_list, decoder_shapes, mask_features, training=False):
         """
-        Args:
-            memory_list: list of encoder feature maps (flattened) [B, S_l, C] for each feature level.
-            memory_pos_list: list of positional encodings [B, S_l, C] for each feature level.
-            decoder_shapes: Tensor [L, 2] giving (H_l, W_l) for each feature level in memory_list.
-            mask_features: [B, Hm, Wm, C] low-level feature map for computing masks (e.g., backbone output at 1/4 resolution).
-        Returns:
-            pred_logits: [B, num_queries, num_classes+1] final class scores (for the last decoder layer).
-            pred_masks:  [B, num_queries, Hm, Wm] final predicted mask logits (for the last decoder layer).
-            aux_outputs (optional): list of dicts with intermediate predictions for auxiliary losses (one per decoder layer).
-        """
-        B = tf.shape(mask_features)[0]
-        # Prepare query embeddings
-        query_embed = tf.tile(self.query_embed[tf.newaxis, :, :], [B, 1, 1])  # [B, Q, 2C]
-        query_content, query_pos = tf.split(query_embed, 2, axis=-1)  # each [B, Q, C]
-        tgt = query_content  # initial query content (to be updated by decoder)
+        Processes encoder features through transformer decoder to generate class and mask predictions.
 
-        # Run the transformer decoder (with masked attention)
+        Args:
+            memory_list (list): List of encoder feature maps (flattened) [B, S_l, C] for each feature level.
+            memory_pos_list (list): List of positional encodings [B, S_l, C] for each feature level.
+            decoder_shapes (tf.Tensor): Tensor [L, 2] giving (H_l, W_l) for each feature level in memory_list.
+            mask_features (tf.Tensor): Low-level feature map [B, Hm, Wm, C] for computing masks (e.g., backbone output at 1/4 resolution).
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tuple: A tuple containing:
+                - pred_logits (tf.Tensor): Final class scores [B, num_queries, num_classes+1] for the last decoder layer.
+                - pred_masks (tf.Tensor): Final predicted mask logits [B, num_queries, Hm, Wm] for the last decoder layer.
+                - aux_outputs (list): List of dicts with intermediate predictions for auxiliary losses (one per decoder layer).
+        """
+        # Prepare query embeddings
+        B = tf.shape(mask_features)[0]
+        query_embed = tf.tile(self.query_embed[tf.newaxis, :, :], [B, 1, 1])
+        query_content, query_pos = tf.split(query_embed, 2, axis=-1)
+        tgt = query_content
+
+        # Run transformer decoder
         decoder_outputs = self.decoder(
             tgt=tgt,
             memory_list=memory_list,
@@ -171,44 +180,39 @@ class Mask2FormerHead(Layer):
             intermediate_outputs = None
             final_output = decoder_outputs
 
-        # Compute class and mask predictions for each decoder output
+        # Compute class and mask predictions
         all_class_logits = []
         all_mask_logits = []
         if intermediate_outputs is not None:
             for dec_out in intermediate_outputs:
-                class_logits = self.class_embed(dec_out, training=training)  # [B, Q, num_classes+1]
-                mask_embed = self.mask_embed(dec_out, training=training)  # [B, Q, C]
-                mask_logits = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)  # [B, Q, Hm, Wm]
+                class_logits = self.class_embed(dec_out, training=training)
+                mask_embed = self.mask_embed(dec_out, training=training)
+                mask_logits = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)
                 all_class_logits.append(class_logits)
                 all_mask_logits.append(mask_logits)
         else:
-            # If no intermediate list (should not happen in this design), just compute from final_output
             class_logits = self.class_embed(final_output, training=training)
             mask_embed = self.mask_embed(final_output, training=training)
             mask_logits = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)
             all_class_logits.append(class_logits)
             all_mask_logits.append(mask_logits)
 
-        # Stack outputs: shape [B, Layers, Q, ...]
-        all_class_logits = tf.stack(all_class_logits, axis=1)  # [B, L_dec, Q, num_classes+1]
-        all_mask_logits = tf.stack(all_mask_logits, axis=1)  # [B, L_dec, Q, Hm, Wm]
+        # Final predictions and auxiliary outputs
+        all_class_logits = tf.stack(all_class_logits, axis=1)
+        all_mask_logits = tf.stack(all_mask_logits, axis=1)
+        pred_logits = all_class_logits[:, -1, ...]
+        pred_masks = all_mask_logits[:, -1, ...]
 
-        # Final predictions from the last layer (for inference)
-        pred_logits = all_class_logits[:, -1, ...]  # [B, Q, num_classes+1]
-        pred_masks = all_mask_logits[:, -1, ...]  # [B, Q, Hm, Wm]
-
-        # (Optional) auxiliary outputs for intermediate layers (for training loss)
+        # Auxiliary outputs for training
         aux_outputs = [
             {"pred_logits": all_class_logits[:, i, ...], "pred_masks": all_mask_logits[:, i, ...]}
-            for i in range(all_class_logits.shape[1] - 1)  # exclude the last one, as it's the final output
+            for i in range(all_class_logits.shape[1] - 1)
         ]
 
         return pred_logits, pred_masks, aux_outputs
 
 
-# ---------------------------------------------------------------------
-# Full Mask2Former-style Keras Model
-# ---------------------------------------------------------------------
+# Full Mask2Former Model
 
 class Mask2FormerModel(tf.keras.Model):
     """
@@ -220,6 +224,18 @@ class Mask2FormerModel(tf.keras.Model):
               -> class logits + mask logits
 
     This is a *model-only* implementation: no loss functions or matching.
+
+    Args:
+        input_shape (tuple): Input image shape. Defaults to (480, 480, 3).
+        transformer_input_channels (int): Channel dimension for transformer inputs. Defaults to 256.
+        num_classes (int): Number of object classes. Defaults to 80.
+        num_queries (int): Number of object queries. Defaults to 100.
+        num_decoder_layers (int): Number of decoder layers. Defaults to 6.
+        num_heads (int): Number of attention heads. Defaults to 8.
+        dim_feedforward (int): Feed-forward dimension. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        name (str): Model name. Defaults to "mask2former_tf".
+        **kwargs: Additional keyword arguments for the base Model class.
     """
 
     def __init__(
@@ -241,12 +257,13 @@ class Mask2FormerModel(tf.keras.Model):
         self.num_queries = num_queries
         self.transformer_input_channels = transformer_input_channels
 
-        # 1) FPN-ResNet backbone
+        # FPN-ResNet backbone
         self.backbone = build_fpn_resnet50(
             input_shape=input_shape,
             ouput_kernels_number=transformer_input_channels,
         )
 
+        # Pixel decoder
         self.pixel_decoder = MSDeformablePixelDecoder(
             d_model=transformer_input_channels,
             num_feature_levels=4,  # p2, p3, p4, p5
@@ -259,7 +276,7 @@ class Mask2FormerModel(tf.keras.Model):
             name="pixel_decoder",
         )
 
-        # 3) Mask2Former head
+        # Mask2Former head
         self.mask2former_head = Mask2FormerHead(
             num_classes=num_classes,
             num_queries=num_queries,
@@ -272,6 +289,19 @@ class Mask2FormerModel(tf.keras.Model):
         )
 
     def call(self, inputs, training=False):
+        """
+        Forward pass through the complete Mask2Former model.
+
+        Args:
+            inputs (tf.Tensor): Input images of shape [B, H, W, 3].
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tuple: A tuple containing:
+                - pred_logits (tf.Tensor): Class predictions [B, num_queries, num_classes+1].
+                - pred_masks (tf.Tensor): Mask predictions [B, num_queries, Hm, Wm].
+                - aux_outputs (list): Auxiliary outputs for deep supervision.
+        """
         p2, p3, p4, p5 = self.backbone(inputs, training=training)
 
         memory_list, memory_pos_list, decoder_shapes, mask_features = self.pixel_decoder(
