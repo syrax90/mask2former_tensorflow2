@@ -18,6 +18,15 @@ from pixel_decoder import SinePositionEmbedding
 class MaskedMultiHeadAttention(Layer):
     """
     Custom Multi-Head Attention Layer for Mask2Former.
+
+    Args:
+        embed_dim (int): Embedding dimension.
+        num_heads (int): Number of attention heads.
+        dropout_rate (float): Dropout rate. Defaults to 0.0.
+        **kwargs: Additional keyword arguments for the base Layer class.
+
+    Raises:
+        ValueError: If embed_dim is not divisible by num_heads.
     """
 
     def __init__(self, embed_dim, num_heads, dropout_rate=0.0, **kwargs):
@@ -48,59 +57,72 @@ class MaskedMultiHeadAttention(Layer):
         return tf.transpose(x, perm=[0, 2, 1, 3])
 
     def call(self, query, key, value, attention_mask=None, training=False):
+        """
+        Applies masked multi-head attention.
+
+        Args:
+            query (tf.Tensor): Query tensor of shape [B, N_q, embed_dim].
+            key (tf.Tensor): Key tensor of shape [B, N_k, embed_dim].
+            value (tf.Tensor): Value tensor of shape [B, N_k, embed_dim].
+            attention_mask (tf.Tensor, optional): Additive attention mask. Defaults to None.
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tf.Tensor: Output tensor of shape [B, N_q, embed_dim].
+        """
         batch_size = tf.shape(query)[0]
 
-        # 1. Projections
+        # Projections
         q = self.q_proj(query)
         k = self.k_proj(key)
         v = self.v_proj(value)
 
-        # 2. Split Heads
-        q = self.split_heads(q, batch_size)  # (B, H, N_q, D_h)
-        k = self.split_heads(k, batch_size)  # (B, H, N_k, D_h)
-        v = self.split_heads(v, batch_size)  # (B, H, N_k, D_h)
+        # Split heads: (B, H, N_q, D_h)
+        q = self.split_heads(q, batch_size)
+        k = self.split_heads(k, batch_size)
+        v = self.split_heads(v, batch_size)
 
-        # 3. Scaled Dot-Product
-        # (B, H, N_q, D_h) * (B, H, D_h, N_k) -> (B, H, N_q, N_k)
+        # Scaled dot-product: (B, H, N_q, N_k)
         attn_logits = tf.matmul(q, k, transpose_b=True)
         attn_logits = attn_logits * self.scale
 
-        # 4. Apply Mask Bias
+        # Apply mask bias
         if attention_mask is not None:
-            # Broadcasting: (B, H, N_q, N_k) + (B, 1, N_q, N_k)
             attn_logits += attention_mask
 
-        # 5. Softmax
+        # Softmax
         attn_weights = tf.nn.softmax(attn_logits, axis=-1)
 
-        # 6. Dropout
+        # Dropout
         if training:
             attn_weights = self.dropout_layer(attn_weights)
 
-        # 7. Weighted Sum
-        # (B, H, N_q, N_k) * (B, H, N_k, D_h) -> (B, H, N_q, D_h)
+        # Weighted sum: (B, H, N_q, D_h)
         output = tf.matmul(attn_weights, v)
 
-        # 8. Concatenate Heads
-        # Transpose back to (B, N_q, H, D_h)
+        # Concatenate heads: (B, N_q, E)
         output = tf.transpose(output, perm=[0, 2, 1, 3])
-        # Reshape to (B, N_q, E)
         output = tf.reshape(output, (batch_size, -1, self.embed_dim))
 
-        # 9. Output Projection
+        # Output projection
         output = self.out_proj(output)
 
         return output
 
-# ---------------------------------------------------------------------
-# Transformer decoder building blocks (Mask2Former-style)
-# ---------------------------------------------------------------------
+# Transformer decoder building blocks
 class TransformerDecoderLayer(Layer):
     """
     A single Transformer decoder layer:
     - self-attention on queries
     - cross-attention from queries to memory (pixel features)
     - feed-forward network
+
+    Args:
+        d_model (int): Model dimension. Defaults to 256.
+        num_heads (int): Number of attention heads. Defaults to 8.
+        dim_feedforward (int): Dimension of feed-forward network. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -146,11 +168,24 @@ class TransformerDecoderLayer(Layer):
             training=False,
             cross_attention_mask=None
     ):
-        # Apply Norm first
+        """
+        Applies transformer decoder layer operations.
+
+        Args:
+            tgt (tf.Tensor): Target query embeddings of shape [B, Q, C].
+            memory (tf.Tensor): Encoder memory of shape [B, S, C].
+            query_pos (tf.Tensor, optional): Query positional embeddings of shape [B, Q, C]. Defaults to None.
+            memory_pos (tf.Tensor, optional): Memory positional embeddings of shape [B, S, C]. Defaults to None.
+            training (bool): Whether in training mode. Defaults to False.
+            cross_attention_mask (tf.Tensor, optional): Cross-attention mask. Defaults to None.
+
+        Returns:
+            tf.Tensor: Transformed query embeddings of shape [B, Q, C].
+        """
+        # Apply norm first
         tgt_norm = self.norm1(tgt)
 
-        # ----- Cross-Attention (masked) -----
-        # Incorporate positional encodings
+        # Cross-attention with positional encodings
         if query_pos is not None:
             q = tgt_norm + query_pos
         else:
@@ -162,7 +197,7 @@ class TransformerDecoderLayer(Layer):
         else:
             k = v = memory
 
-        # Apply masked cross-attention (if attention_mask is provided, it has shape [B, Q, S])
+        # Masked cross-attention
         tgt2 = self.cross_attn(
             query=q,
             value=v,
@@ -170,13 +205,11 @@ class TransformerDecoderLayer(Layer):
             attention_mask=cross_attention_mask,
             training=training,
         )
-        tgt = tgt + self.dropout1(tgt2, training=training) # residual connection
+        tgt = tgt + self.dropout1(tgt2, training=training)
 
-        # Self-Attention (Pre-Norm)
+        # Self-attention among queries
         tgt_norm = self.norm2(tgt)
 
-        # ----- Self-Attention (among queries) -----
-        # After cross-attention, allow queries to interact with each other
         if query_pos is not None:
             q = tgt_norm + query_pos
             k = tgt_norm + query_pos
@@ -184,21 +217,27 @@ class TransformerDecoderLayer(Layer):
             q = k = tgt_norm
 
         tgt2 = self.self_attn(query=q, key=k, value=tgt_norm, training=training)
-        tgt = tgt + self.dropout2(tgt2, training=training)  # residual connection
+        tgt = tgt + self.dropout2(tgt2, training=training)
 
-        # FFN (Pre-Norm)
+        # Feed-forward network
         tgt_norm = self.norm3(tgt)
-
-        # ----- Feed-forward -----
         ff_output  = self.linear2(self.linear1(tgt_norm, training=training), training=training)
-        tgt = tgt + self.dropout3(ff_output, training=training)  # residual connection
+        tgt = tgt + self.dropout3(ff_output, training=training)
 
-        return tgt  # shape [B, Q, C] (updated queries)
+        return tgt
 
 class TransformerDecoder(Layer):
     """
     Transformer Decoder with Masked Cross-Attention (Mask2Former-style),
     using multi-scale memories in round-robin scheduling.
+
+    Args:
+        num_layers (int): Number of decoder layers. Defaults to 6.
+        d_model (int): Model dimension. Defaults to 256.
+        num_heads (int): Number of attention heads. Defaults to 8.
+        dim_feedforward (int): Dimension of feed-forward network. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
     def __init__(self, num_layers=6, d_model=256, num_heads=8,
                  dim_feedforward=1024, dropout=0.1, **kwargs):
@@ -215,15 +254,13 @@ class TransformerDecoder(Layer):
 
     def _resize_mask_logits_to_level(self, mask_logits, target_h, target_w):
         """Resize mask logits `mask_logits` to the resolution (target_h, target_w)."""
-        # Reshape to [B*Q, H_src, W_src, 1] for resizing (treat each query's mask as an image)
+        # Reshape and resize mask logits
         B = tf.shape(mask_logits)[0]
         Q = tf.shape(mask_logits)[1]
         H_src = tf.shape(mask_logits)[2]
         W_src = tf.shape(mask_logits)[3]
         mask_logits_reshaped = tf.reshape(mask_logits, (B * Q, H_src, W_src, 1))
-        # Use bilinear interpolation for resizing (or nearest for binary mask, but logits are continuous)
         mask_logits_resized = tf.image.resize(mask_logits_reshaped, size=(target_h, target_w), method='bilinear')
-        # Reshape back to [B, Q, target_h, target_w]
         mask_logits_resized = tf.reshape(mask_logits_resized, (B, Q, target_h, target_w))
         return mask_logits_resized
 
@@ -232,37 +269,22 @@ class TransformerDecoder(Layer):
         Creates an additive attention bias from mask logits.
         Returns tensor of shape [B, Q, S] with values 0.0 or -1e9.
         """
-        # 1. Resize logits
+        # Resize and threshold logits
         resized_logits = self._resize_mask_logits_to_level(mask_logits, target_h, target_w)
+        mask_bool = tf.stop_gradient(resized_logits > 0.0)  # [B, Q, H, W]
 
-        # 2. Thresholding: logits > 0.0 is equivalent to sigmoid(logits) > 0.5
-        # We stop gradients here because the attention mask topology should not
-        # propagate gradients back to the mask predictor (Standard Mask2Former logic).
-        mask_bool = tf.stop_gradient(resized_logits > 0.0)  # [B, Q, H, W] of bool
-
-        # 3. Flatten spatial dimensions
+        # Flatten and create additive bias
         B = tf.shape(mask_bool)[0]
         Q = tf.shape(mask_bool)[1]
         mask_bool_flat = tf.reshape(mask_bool, [B, Q, target_h * target_w])  # [B, Q, S]
 
-        # 4. Create Additive Bias
-        # Initialize with large negative number (effectively -infinity after softmax)
         attn_bias = tf.fill(tf.shape(mask_bool_flat), -1e9)
-        # Set 0.0 where the mask is True (allowed regions)
         attn_bias = tf.where(mask_bool_flat, tf.zeros_like(attn_bias), attn_bias)
 
-        # 5. Safety check: Handle queries with NO allowed pixels (all False).
-        # In PyTorch, this often results in NaNs if not handled.
-        # If a row is all -1e9, we set it to all 0.0 (attend everywhere) to prevent NaN.
-
-        # Check if max value in row is -1e9 (meaning no 0.0s exist)
+        # Handle empty masks to prevent NaN
         row_max = tf.reduce_max(attn_bias, axis=-1, keepdims=True)
-        is_empty_row = tf.equal(row_max, -1e9)  # [B, Q, 1]
-
-        # Broadcast condition to [B, Q, S]
+        is_empty_row = tf.equal(row_max, -1e9)
         is_empty_row_broad = tf.broadcast_to(is_empty_row, tf.shape(attn_bias))
-
-        # If empty row, replace with 0.0 (allow all), else keep attn_bias
         attn_bias = tf.where(is_empty_row_broad, tf.zeros_like(attn_bias), attn_bias)
 
         return attn_bias
@@ -271,10 +293,10 @@ class TransformerDecoder(Layer):
         """
         Converts mask predictions into an additive attention mask bias for Mask2Former.
 
-        Fixed:
-        - Handles empty masks to prevent NaN in Softmax.
-        - Uses Bilinear interpolation to match PyTorch standard.
-        - Corrected transpose permutations.
+        This method resizes mask predictions to the target image shape using bilinear interpolation,
+        creates a binary mask based on the threshold, and converts it into an additive bias
+        (0 for valid regions, large negative value for invalid regions) for attention mechanisms.
+        It also handles empty masks to prevent NaN values in softmax.
         """
         # mask_preds shape: (Batch, Num_Queries, H, W)
 
@@ -300,26 +322,16 @@ class TransformerDecoder(Layer):
         # Reshape to (Batch, Num_Queries, H*W)
         mask_flat = tf.reshape(mask_preds, (batch_size, num_queries, -1))
 
-        # 3. Create Binary Mask
-        # Assumes mask_preds are Probabilities [0, 1].
-        # If Logits, change logic to: mask_flat > 0.0
+        # Create binary mask and invert to bias
         binary_mask = tf.cast(mask_flat > threshold, tf.float32)
-
-        # 4. Invert to Bias
-        # Formula: (1.0 - binary_mask) * LargeNeg
-        # Use -1e9. avoid -inf to prevent potential NaNs in some TF ops.
         large_neg = -1e9
         attn_bias = (1.0 - binary_mask) * large_neg
 
-        # --- CRITICAL STABILITY FIX ---
-        # If a mask is empty (all background), Softmax(All -1e9) = NaN.
-        # We must allow the query to attend to something (e.g., everything)
-        # or handle it. Here we force bias to 0.0 (attend all) if mask is empty.
+        # Handle empty masks to prevent NaN
         mask_is_not_empty = tf.reduce_any(binary_mask > 0.5, axis=-1, keepdims=True)
         attn_bias = tf.where(mask_is_not_empty, attn_bias, tf.zeros_like(attn_bias))
-        # ------------------------------
 
-        # 5. Expand for Heads -> (Batch, 1, Num_Queries, Key_Len)
+        # Expand for heads: [B, 1, Q, S]
         attn_bias = tf.expand_dims(attn_bias, axis=1)
 
         return attn_bias
@@ -354,25 +366,20 @@ class TransformerDecoder(Layer):
         num_levels = len(memory_list)
 
         intermediate_states = []
-        # --- Prepare initial cross-attention mask for the first decoder layer ---
+        # Prepare initial cross-attention mask
         if mask_features is not None and mask_embed_fn is not None:
-            # Predict initial mask logits at the mask_features resolution (e.g. highest resolution)
             initial_mask_embed = mask_embed_fn(tgt)  # [B, Q, C]
             initial_mask_logits = tf.einsum('bqc,bhwc->bqhw', initial_mask_embed,
-                                            mask_features)  # [B, Q, H_mask, W_mask]
-
-            # Create bias for Level 0
+                                            mask_features)
             target_h = decoder_shapes[0, 0]
             target_w = decoder_shapes[0, 1]
-            #cross_attn_bias = self._create_attention_bias(initial_mask_logits, target_h, target_w)
             cross_attn_bias = self._prepare_mask2former_bias(initial_mask_logits, img_shape=(target_h, target_w))
         else:
             cross_attn_bias = None
 
-        # --- Decoder layers with masked cross-attention ---
+        # Decoder layers with masked cross-attention
         for i, layer in enumerate(self.layers):
-            lvl = i % num_levels  # select memory level in round-robin fashion
-            # Apply one decoder layer (Masked Cross-Attention followed by Self-Attention and FFN inside layer)
+            lvl = i % num_levels
             tgt = layer(
                 tgt, memory_list[lvl],
                 query_pos=query_pos, memory_pos=memory_pos_list[lvl],
@@ -380,24 +387,18 @@ class TransformerDecoder(Layer):
             )
             intermediate_states.append(tgt)
 
-            # Prepare mask for next layer's cross-attention (except after the last layer)
+            # Prepare mask for next layer
             if mask_features is not None and mask_embed_fn is not None and i < self.num_layers - 1:
-                # Predict mask logits at high resolution and resize to next feature level's resolution
-                mask_embed = mask_embed_fn(tgt)  # [B, Q, C]
-                mask_logits_highres = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)  # [B, Q, H_mask, W_mask]
+                mask_embed = mask_embed_fn(tgt)
+                mask_logits_highres = tf.einsum('bqc,bhwc->bqhw', mask_embed, mask_features)
                 next_lvl = (i + 1) % num_levels
                 next_h = decoder_shapes[next_lvl, 0]
                 next_w = decoder_shapes[next_lvl, 1]
-                # Create bias for next level
-                #cross_attn_bias = self._create_attention_bias(mask_logits_highres, next_h, next_w)
                 cross_attn_bias = self._prepare_mask2former_bias(mask_logits_highres, img_shape=(next_h, next_w))
             else:
-                # If we can't generate a mask (or it's the last layer),
-                # we technically don't need to update cross_attn_bias for the loop,
-                # but explicit None helps avoid bugs if logic changes.
                 if i == self.num_layers - 1:
                     pass
                 else:
                     cross_attn_bias = None
 
-        return intermediate_states  # list of query states after each decoder layer (including initial state)
+        return intermediate_states

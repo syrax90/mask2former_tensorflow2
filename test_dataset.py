@@ -12,33 +12,49 @@ import numpy as np
 import cv2
 import random
 
-from config import DynamicSOLOConfig
+from config import Mask2FormerConfig
 from coco_dataset import create_coco_tf_dataset
 from coco_dataset_optimized import create_coco_tfrecord_dataset
 import shutil
 
-def draw_solo_instances(
-    image,                 # tf.Tensor or np.ndarray, HxWx3, RGB, [0,1] or [0,255]
-    cate_target,           # tf.Tensor or np.ndarray, shape [sum(S_i^2)], int32, -1 for empty else category_id
-    mask_target,           # tf.Tensor or np.ndarray, shape [Hf, Wf, sum(S_i^2)], uint8 {0,1}
-    class_names=None,      # dict {category_id: "name"} (same role as in your snippet)
-    show_labels=True       # follow your snippet's switch
+def draw_instance_predictions(
+    image,
+    cate_target,
+    mask_target,
+    class_names=None,
+    show_labels=True
 ):
     """
     Returns a BGR uint8 visualization with colored masks and optional class labels.
-    Coloring, transparency and blending follow the behavior in draw_solo_masks():
+
+    Coloring, transparency and blending follow the behavior in draw_instance_masks():
       - random color per instance
       - alpha = 0.5
       - vis[mask==1] = alpha*color + (1-alpha)*vis[mask==1]
       - label near the first pixel of the mask
+
+    Args:
+        image (tf.Tensor or np.ndarray): Input image of shape (H, W, 3), RGB.
+            Values can be in [0, 1] or [0, 255].
+        cate_target (tf.Tensor or np.ndarray): Category targets of shape [sum(S_i^2)].
+            Values are int32, -1 for empty, otherwise category_id.
+        mask_target (tf.Tensor or np.ndarray): Mask targets of shape [Hf, Wf, sum(S_i^2)].
+            Values are uint8 {0, 1}.
+        class_names (dict, optional): Dictionary mapping category_id to class name string.
+            Defaults to None.
+        show_labels (bool, optional): Whether to show text labels on the image.
+            Defaults to True.
+
+    Returns:
+        np.ndarray: The visualized image as a BGR uint8 array.
     """
 
-    # --- to numpy ---
+    # Convert to numpy
     if isinstance(image, tf.Tensor):       image = image.numpy()
     if isinstance(cate_target, tf.Tensor): cate_target = cate_target.numpy()
     if isinstance(mask_target, tf.Tensor): mask_target = mask_target.numpy()
 
-    # --- image to uint8 BGR (so cv2.imwrite works as expected) ---
+    # Convert image to uint8 BGR
     img = image.copy()
     if img.dtype != np.uint8:
         img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
@@ -56,7 +72,7 @@ def draw_solo_instances(
     else:
         up_masks = mask_target
 
-    # positive channels (instances)
+    # Positive channels (instances)
     pos_idx = np.where(cate_target >= 0)[0]
     if pos_idx.size == 0:
         return vis
@@ -100,24 +116,21 @@ def draw_solo_instances(
 
 def save_dataset_preview(dataset, coco_classes, out_dir, max_images=50, show_labels=True):
     """
-    Save a grid-free preview of SOLO targets for a dataset.
+    Save a grid-free preview of Mask2Former targets for a dataset.
 
     Iterates over a `tf.data.Dataset` that yields `(images, cate_targets, mask_targets)`
-    batches, renders each sample with `draw_solo_instances`, and writes PNG files to
+    batches, renders each sample with `draw_instance_predictions`, and writes PNG files to
     `out_dir` until `max_images` previews are saved.
 
     Args:
-      dataset: `tf.data.Dataset` where each batch is a tuple:
-        - images: Tensor of shape (B, H, W, 3), RGB, float in [0,1] or uint8.
-        - cate_targets: Tensor of shape (B, C), int32; -1 for empty, category_id otherwise.
-        - mask_targets: Tensor of shape (B, Hf, Wf, C), uint8 {0,1}.
-      coco_classes: `dict[int, str]` mapping category_id → class name for labeling.
-      out_dir: Destination directory to store rendered PNG files.
-      max_images: Maximum number of samples to save across all batches.
-      show_labels: If True, overlay class labels on the previews.
-
-    Returns:
-      None
+        dataset (tf.data.Dataset): A dataset yielding batches of:
+            - images: Tensor of shape (B, H, W, 3), RGB.
+            - cate_targets: Tensor of shape (B, C), int32.
+            - mask_targets: Tensor of shape (B, Hf, Wf, C), uint8.
+        coco_classes (dict): Mapping of {category_id (int): class name (str)}.
+        out_dir (str): Destination directory to store rendered PNG files.
+        max_images (int, optional): Maximum number of samples to save. Defaults to 50.
+        show_labels (bool, optional): If True, overlay class labels. Defaults to True.
     """
     import os, cv2
     os.makedirs(out_dir, exist_ok=True)
@@ -126,7 +139,7 @@ def save_dataset_preview(dataset, coco_classes, out_dir, max_images=50, show_lab
         images, cate_targets, mask_targets = batch
         bs = images.shape[0]
         for b in range(bs):
-            vis = draw_solo_instances(
+            vis = draw_instance_predictions(
                 images[b].numpy(),
                 cate_targets[b].numpy(),
                 mask_targets[b].numpy(),
@@ -147,7 +160,7 @@ if gpus:
         print(e)
 
 if __name__ == '__main__':
-    cfg = DynamicSOLOConfig()
+    cfg = Mask2FormerConfig()
     coco = COCO(cfg.train_annotation_path)
     categories = coco.loadCats(coco.getCatIds())
     # Create dictionary: {category_id: category_name}
@@ -171,7 +184,6 @@ if __name__ == '__main__':
             coco_img_dir=cfg.images_path,
             target_size=(img_height, img_width),
             batch_size=cfg.batch_size,
-            grid_sizes=cfg.grid_sizes,
             scale=cfg.image_scales[0],
             augment=False,
             number_images=cfg.number_images

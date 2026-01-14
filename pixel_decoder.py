@@ -11,6 +11,11 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
     """
     Standard DETR 2D sine/cosine positional encoding, matching Mask2Former:
     normalize=True, scale=2*pi.
+
+    Attributes:
+        num_pos_feats (int): Number of positional features.
+        temperature (float): Temperature parameter for sine/cosine modulation.
+        scale (float): Scale factor for normalization.
     """
 
     def __init__(self, num_pos_feats=128, temperature=10000, scale=None, **kwargs):
@@ -22,6 +27,16 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
         self.scale = float(scale)
 
     def call(self, x, mask=None):
+        """
+        Generates 2D sine/cosine positional embeddings for input features.
+
+        Args:
+            x (tf.Tensor): Input feature map of shape [B, H, W, C].
+            mask (tf.Tensor, optional): Boolean mask of shape [B, H, W] where True indicates padding. Defaults to None.
+
+        Returns:
+            tf.Tensor: Positional embeddings of shape [B, H, W, 2*num_pos_feats].
+        """
         # x: [B, H, W, C]
         x = tf.convert_to_tensor(x)
         B = tf.shape(x)[0]
@@ -37,9 +52,9 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
 
         not_mask_f = tf.cast(not_mask, tf.float32)
 
-        # cumsum along height and width
-        y_embed = tf.cumsum(not_mask_f, axis=1)  # [B, H, W]
-        x_embed = tf.cumsum(not_mask_f, axis=2)  # [B, H, W]
+        # Cumsum along height and width
+        y_embed = tf.cumsum(not_mask_f, axis=1)
+        x_embed = tf.cumsum(not_mask_f, axis=2)
 
         eps = 1e-6
         y_last = y_embed[:, -1:, :] + eps
@@ -73,6 +88,15 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
 class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
     """
     One encoder layer using MSDeformAttn + FFN (like Deformable DETR / Mask2Former).
+
+    Args:
+        d_model (int): Model dimension. Defaults to 256.
+        n_levels (int): Number of feature levels. Defaults to 4.
+        n_heads (int): Number of attention heads. Defaults to 8.
+        n_points (int): Number of sampling points. Defaults to 4.
+        dim_feedforward (int): Dimension of FFN. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -115,6 +139,16 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
 
     @staticmethod
     def with_pos_embed(tensor, pos):
+        """
+        Adds positional embeddings to tensor if provided.
+
+        Args:
+            tensor (tf.Tensor): Input tensor.
+            pos (tf.Tensor, optional): Positional embeddings to add.
+
+        Returns:
+            tf.Tensor: Tensor with positional embeddings added, or original tensor if pos is None.
+        """
         return tensor if pos is None else tensor + pos
 
     def call(
@@ -127,6 +161,21 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
         padding_mask=None,      # [B, S] or None
         training=False,
     ):
+        """
+        Applies multi-scale deformable attention and feed-forward network.
+
+        Args:
+            src (tf.Tensor): Source features of shape [B, S, C].
+            pos (tf.Tensor): Positional embeddings of shape [B, S, C].
+            reference_points (tf.Tensor): Reference points of shape [B, S, L, 2].
+            spatial_shapes (tf.Tensor): Spatial shapes of each level, shape [L, 2].
+            level_start_index (tf.Tensor): Starting index for each level, shape [L].
+            padding_mask (tf.Tensor, optional): Padding mask of shape [B, S]. Defaults to None.
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tf.Tensor: Transformed features of shape [B, S, C].
+        """
 
         # MSDeformAttn self-attention (multi-scale)
         src2 = self.self_attn(
@@ -156,6 +205,16 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
 class DeformableTransformerEncoder(tf.keras.layers.Layer):
     """
     Stack of DeformableTransformerEncoderLayer (multi-scale deformable encoder).
+
+    Args:
+        num_layers (int): Number of encoder layers. Defaults to 6.
+        d_model (int): Model dimension. Defaults to 256.
+        n_levels (int): Number of feature levels. Defaults to 4.
+        n_heads (int): Number of attention heads. Defaults to 8.
+        n_points (int): Number of sampling points. Defaults to 4.
+        dim_feedforward (int): Dimension of FFN. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -189,15 +248,16 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
     @staticmethod
     def get_reference_points(spatial_shapes, valid_ratios):
         """
-        Generates reference points for MSDeformAttn.
+        Generates reference points for multi-scale deformable attention.
+
         Ensures output is (x, y) compatible with bilinear sampling.
 
         Args:
-            spatial_shapes: [L, 2] (H_l, W_l)
-            valid_ratios:   [B, L, 2] (ratio_h, ratio_w) -- Assumed (H, W) to match spatial_shapes
+            spatial_shapes (tf.Tensor): Spatial dimensions [L, 2] as (H_l, W_l) for each level.
+            valid_ratios (tf.Tensor): Valid ratios [B, L, 2] as (ratio_h, ratio_w) for each level.
 
         Returns:
-            reference_points: [B, S, L, 2] containing (x, y) coordinates
+            tf.Tensor: Reference points of shape [B, S, L, 2] containing (x, y) coordinates.
         """
         spatial_shapes = tf.cast(spatial_shapes, tf.int32)
         valid_ratios = tf.cast(valid_ratios, tf.float32)
@@ -213,47 +273,34 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
             return lvl < L
 
         def body(lvl, ta_):
+            # Generate grid for this level
             H = spatial_shapes[lvl, 0]
             W = spatial_shapes[lvl, 1]
-
             H_f = tf.cast(H, tf.float32)
             W_f = tf.cast(W, tf.float32)
 
-            # 1. Generate grid relative to the FULL padded size
-            ref_y = tf.linspace(0.5, H_f - 0.5, H)  # [H]
-            ref_x = tf.linspace(0.5, W_f - 0.5, W)  # [W]
+            ref_y = tf.linspace(0.5, H_f - 0.5, H)
+            ref_x = tf.linspace(0.5, W_f - 0.5, W)
+            yy, xx = tf.meshgrid(ref_y, ref_x, indexing="ij")
+            yy = tf.reshape(yy, [-1])
+            xx = tf.reshape(xx, [-1])
 
-            yy, xx = tf.meshgrid(ref_y, ref_x, indexing="ij")  # yy=[H, W], xx=[H, W]
-            yy = tf.reshape(yy, [-1])  # [HW]
-            xx = tf.reshape(xx, [-1])  # [HW]
+            # Handle valid ratios
+            ratio_h = valid_ratios[:, lvl, 0]
+            ratio_w = valid_ratios[:, lvl, 1]
+            yy_norm = yy[tf.newaxis, :] / (ratio_h[:, tf.newaxis] * H_f)
+            xx_norm = xx[tf.newaxis, :] / (ratio_w[:, tf.newaxis] * W_f)
 
-            # 2. Handle Valid Ratios (assuming input is H, W)
-            # valid_ratios is [B, L, 2] -> [:, lvl, 0] is Height ratio, [:, lvl, 1] is Width ratio
-            ratio_h = valid_ratios[:, lvl, 0]  # [B]
-            ratio_w = valid_ratios[:, lvl, 1]  # [B]
-
-            # Normalize to [0, 1] relative to the VALID area
-            yy_norm = yy[tf.newaxis, :] / (ratio_h[:, tf.newaxis] * H_f)  # [B, HW]
-            xx_norm = xx[tf.newaxis, :] / (ratio_w[:, tf.newaxis] * W_f)  # [B, HW]
-
-            # Stack as (x, y) to match MSDeformAttn expectation
+            # Stack as (x, y) coordinates
             ref = tf.stack([xx_norm, yy_norm], axis=-1)  # [B, HW, 2]
-            ref = tf.transpose(ref, [1, 0, 2])  # [HW, B, 2] (for ta.concat)
+            ref = tf.transpose(ref, [1, 0, 2])  # [HW, B, 2]
 
             ta_ = ta_.write(lvl, ref)
             return lvl + 1, ta_
 
-        _, ta = tf.while_loop(cond, body, loop_vars=[tf.constant(0, tf.int32), ta], parallel_iterations=1)
-
-        # [S, B, 2] -> [B, S, 2]
+        # Reconstruct reference points: [B, S, L, 2]
         reference_points = tf.transpose(ta.concat(), [1, 0, 2])
-
-        # [B, S, L, 2]
-        # FIX: valid_ratios is (H, W), but reference_points is (x, y).
-        # We must multiply x by ratio_w (index 1) and y by ratio_h (index 0).
-        # We reverse valid_ratios last dim to convert (H, W) -> (W, H).
         valid_ratios_wh = valid_ratios[:, tf.newaxis, :, ::-1]
-
         reference_points = reference_points[:, :, tf.newaxis, :] * valid_ratios_wh
 
         return reference_points
@@ -268,10 +315,24 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
         padding_mask=None, # [B, S] or None
         training=False,
     ):
+        """
+        Applies multi-scale deformable transformer encoding.
+
+        Args:
+            src (tf.Tensor): Source features of shape [B, S, C].
+            spatial_shapes (tf.Tensor): Spatial shapes of each level, shape [L, 2].
+            level_start_index (tf.Tensor): Starting index for each level, shape [L].
+            valid_ratios (tf.Tensor): Valid ratios for each level, shape [B, L, 2].
+            pos (tf.Tensor, optional): Positional embeddings of shape [B, S, C]. Defaults to None.
+            padding_mask (tf.Tensor, optional): Padding mask of shape [B, S]. Defaults to None.
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tf.Tensor: Encoded features of shape [B, S, C].
+        """
         output = src
         reference_points = self.get_reference_points(spatial_shapes, valid_ratios)
 
-        # This loop is fine in graph mode because it's over a Python list of fixed length.
         for layer in self.layers:
             output = layer(
                 output,
@@ -289,13 +350,20 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
     """
     Mask2Former-style pixel decoder with Multi-Scale Deformable Attention encoder.
 
-    Inputs:
-        features: list/tuple of multi-scale feature maps from backbone/FPN:
-            [x2, x3, x4, x5] with strides [4, 8, 16, 32], all having C channels.
+    This layer takes multi-scale feature maps from the backbone, processes them with a deformable
+    transformer encoder, and produces a high-resolution mask feature map and multi-level memory
+    features for the decoder.
 
-    Outputs:
-        memory:        [B, S, C]   (flattened multi-level encoder output)
-        mask_features: [B, Hm, Wm, C]  (high-resolution features, stride 4)
+    Args:
+        d_model (int): Model dimension. Defaults to 256.
+        num_feature_levels (int): Number of input feature levels. Defaults to 4.
+        transformer_num_feature_levels (int): Number of levels used in transformer. Defaults to 3.
+        num_encoder_layers (int): Number of encoder layers. Defaults to 6.
+        n_heads (int): Number of attention heads. Defaults to 8.
+        n_points (int): Number of sampling points. Defaults to 4.
+        dim_feedforward (int): Dimension of FFN. Defaults to 1024.
+        dropout (float): Dropout rate. Defaults to 0.1.
+        **kwargs: Additional keyword arguments for the base Layer class.
     """
 
     def __init__(
@@ -362,9 +430,18 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
 
     def call(self, features, training=False):
         """
+        Processes multi-scale features through pixel decoder.
+
         Args:
-            features: list of tensors [x2, x3, x4, x5],
-                      each shape [B, H_l, W_l, C_in]
+            features (list): List of feature tensors [x2, x3, x4, x5], each of shape [B, H_l, W_l, C_in].
+            training (bool): Whether in training mode. Defaults to False.
+
+        Returns:
+            tuple: A tuple containing:
+                - memory_list (list): List of flattened encoder outputs [B, S_l, C] for each decoder level.
+                - memory_pos_list (list): List of positional encodings [B, S_l, C] for each decoder level.
+                - decoder_shapes (tf.Tensor): Spatial shapes [L_dec, 2] for decoder levels.
+                - mask_features (tf.Tensor): High-resolution mask features [B, Hm, Wm, C] at stride 4.
         """
         assert len(features) == self.num_feature_levels, (
                 "Expected %d feature levels, got %d"
@@ -380,17 +457,13 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
             x_proj = self.input_proj[i](x)
             proj_feats.append(x_proj)
 
-        # ------------------------------------------------------------
-        # Build deformable-encoder inputs ONLY from p3,p4,p5 (levels 1..3)
-        # ------------------------------------------------------------
-        enc_proj_feats = proj_feats[1:1 + self.transformer_num_feature_levels]  # p3,p4,p5
+        # Build deformable-encoder inputs from p3, p4, p5
+        enc_proj_feats = proj_feats[1:1 + self.transformer_num_feature_levels]
         pos_feats = []
         spatial_shapes_list = []
         level_element_nums = []
 
-        # ------------------------------------------------------------------
-        # 1. Project to common dimension and build positional encodings
-        # ------------------------------------------------------------------
+        # Project to common dimension and build positional encodings
         for i in range(self.transformer_num_feature_levels):
             x_proj = enc_proj_feats[i]
 
@@ -407,9 +480,7 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
         spatial_shapes = tf.stack(spatial_shapes_list, axis=0)  # [L, 2]
         level_element_nums = tf.stack(level_element_nums, axis=0)  # [L]
 
-        # ------------------------------------------------------------------
-        # 2. Flatten and concat features + pos across levels
-        # ------------------------------------------------------------------
+        # Flatten and concat features across levels
         src_flatten_list = []
         pos_flatten_list = []
 
@@ -433,19 +504,15 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
             axis=0,
         )
 
-        # ------------------------------------------------------------------
-        # 3. valid_ratios & padding_mask (no padding -> ratios=1, mask=None)
-        # ------------------------------------------------------------------
+        # Valid ratios and padding mask
         batch_size = tf.shape(src)[0]
         valid_ratios = tf.ones(
             [batch_size, self.transformer_num_feature_levels, 2],
             dtype=tf.float32,
         )
-        padding_mask = None  # you can wire a real mask here if you have one
+        padding_mask = None
 
-        # ------------------------------------------------------------------
-        # 4. Multi-scale deformable encoder
-        # ------------------------------------------------------------------
+        # Multi-scale deformable encoder
         memory = self.encoder(
             src,
             spatial_shapes=spatial_shapes,
@@ -456,74 +523,50 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
             training=training,
         )  # [B, S, C]
 
-        # ------------------------------------------------------------------
-        # 5. Split encoder output back to 3 feature maps (p3,p4,p5)
-        # ------------------------------------------------------------------
+        # Split encoder output back to feature maps
         encoded_feats = []
         start = 0
         for i in range(self.transformer_num_feature_levels):
-            num_elems = level_element_nums[i]  # scalar tensor
+            num_elems = level_element_nums[i]
             end = start + num_elems
-
-            feat_i = memory[:, start:end, :]  # [B, H_i*W_i, C]
+            feat_i = memory[:, start:end, :]
             H_i = spatial_shapes[i, 0]
             W_i = spatial_shapes[i, 1]
-
             feat_i = tf.reshape(feat_i, [batch_size, H_i, W_i, self.d_model])
             encoded_feats.append(feat_i)
             start = end
 
         encoded_feats = [proj_feats[0]] + encoded_feats  # [p2, p3, p4, p5]
 
-        # ------------------------------------------------------------------
-        # 6. Top-down FPN-style fusion to get mask_features
-        # ------------------------------------------------------------------
+        # Top-down FPN-style fusion
         x = encoded_feats[-1]
-        x = self.output_convs[-1](x)  # [B, H_L, W_L, C]
+        x = self.output_convs[-1](x)
 
         for level in reversed(range(self.num_feature_levels - 1)):
-            # Upsample to current level spatial size
             target_h = tf.shape(encoded_feats[level])[1]
             target_w = tf.shape(encoded_feats[level])[2]
-
-            x_upsampled = tf.image.resize(
-                x,
-                size=[target_h, target_w],
-                method="bilinear",
-            )
-
-            # Add skip connection from encoder output at this level
+            x_upsampled = tf.image.resize(x, size=[target_h, target_w], method="bilinear")
             x = encoded_feats[level] + x_upsampled
             x = self.output_convs[level](x)
 
-        # Highest resolution feature (stride 4) for mask prediction
-        mask_features = x  # [B, H_2, W_2, C]
+        mask_features = x
 
-        # --------------------------------------------------------------
-        # 7. Build multi-scale memories for the Transformer decoder
-        #    Mask2Former typically uses 3 scales for cross-attn:
-        #    strides 8/16/32 (exclude stride 4 which is mask_features).
-        #    We order them from low-res -> high-res: 1/8, 1/16, 1/32
-        # --------------------------------------------------------------
-        decoder_feats = encoded_feats[1:]  # p3, p4, p5
-
+        # Build multi-scale memories for decoder
+        decoder_feats = encoded_feats[1:]
         memory_list = []
         memory_pos_list = []
-        decoder_shapes = []  # list of [H_l, W_l] tensors
-
+        decoder_shapes = []
         B = tf.shape(mask_features)[0]
 
         for feat in decoder_feats:
             H_l = tf.shape(feat)[1]
             W_l = tf.shape(feat)[2]
-            decoder_shapes.append(tf.stack([H_l, W_l], axis=0))  # [2]
-
+            decoder_shapes.append(tf.stack([H_l, W_l], axis=0))
             mem = tf.reshape(feat, [B, H_l * W_l, self.d_model])
             memory_list.append(mem)
-
             pos_l = self.pos_embedding(feat)
             pos_l = tf.reshape(pos_l, [B, H_l * W_l, self.d_model])
             memory_pos_list.append(pos_l)
 
-        decoder_shapes = tf.stack(decoder_shapes, axis=0)  # [L_dec, 2]
+        decoder_shapes = tf.stack(decoder_shapes, axis=0)
         return memory_list, memory_pos_list, decoder_shapes, mask_features

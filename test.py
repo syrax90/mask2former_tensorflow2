@@ -13,7 +13,7 @@ import numpy as np
 import tensorflow as tf
 from pycocotools.coco import COCO
 
-from config import DynamicSOLOConfig
+from config import Mask2FormerConfig
 from coco_dataset import get_classes
 from model_functions import Mask2FormerModel
 import logging
@@ -30,22 +30,20 @@ def preprocess_image(image_path, input_size=(320, 320)):
     Also returns the original image shape and the unnormalized RGB image.
 
     Args:
-      image_path (str): Path to the input image file.
-      input_size (Tuple[int, int], optional): Target size `(width, height)` to
-        resize the image to. Defaults to `(320, 320)`.
+        image_path (str): Path to the input image file.
+        input_size (tuple, optional): Target size `(width, height)` to resize the image to.
+            Defaults to `(320, 320)`.
 
     Returns:
-      Tuple[np.ndarray, Tuple[int, int], np.ndarray]:
-        A 3-tuple `(img_resized, original_shape, img)` where:
-          * `img_resized` (np.ndarray): Resized and normalized RGB image of
-            shape `(H, W, 3)`, dtype `float32`, values in `[0, 1]`.
-          * `original_shape` (Tuple[int, int]): Original image height and width
-            as `(H_orig, W_orig)`.
-          * `img` (np.ndarray): Original RGB image **before** resizing and
-            normalization, dtype `uint8`, values in `[0, 255]`.
+        tuple: A 3-tuple `(img_resized, original_shape, img)` where:
+            - `img_resized` (np.ndarray): Resized and normalized RGB image of shape `(H, W, 3)`,
+              dtype `float32`, values in `[0, 1]`.
+            - `original_shape` (tuple): Original image height and width as `(H_orig, W_orig)`.
+            - `img` (np.ndarray): Original RGB image **before** resizing and normalization,
+              dtype `uint8`, values in `[0, 255]`.
 
     Raises:
-      ValueError: If the image cannot be read from `image_path`.
+        ValueError: If the image cannot be read from `image_path`.
     """
     img = cv2.imread(image_path, cv2.IMREAD_COLOR)
     if img is None:
@@ -69,23 +67,23 @@ def matrix_nms(masks, scores, labels, pre_nms_k=500, post_nms_k=100, score_thres
     candidates. Masks are first binarized at 0.5.
 
     Args:
-      masks (tf.Tensor): Predicted masks of shape `(N, H, W)`, values in `[0, 1]`.
-      scores (tf.Tensor): Confidence scores of shape `(N,)`.
-      labels (tf.Tensor): Class indices of shape `(N,)`, dtype integer.
-      pre_nms_k (Optional[int]): If provided, keep only the top-`k` by `scores`
-        before NMS to reduce computation. Defaults to `500`.
-      post_nms_k (Optional[int]): If provided, keep only the top-`k` by decayed
-        scores after NMS. If `None`, keep all above the threshold. Defaults to `100`.
-      score_threshold (float): Minimum decayed score to keep a mask. Defaults to `0.5`.
-      sigma (float): Gaussian decay parameter used in Matrix NMS. Defaults to `0.5`.
+        masks (tf.Tensor): Predicted masks of shape `(N, H, W)`, values in `[0, 1]`.
+        scores (tf.Tensor): Confidence scores of shape `(N,)`.
+        labels (tf.Tensor): Class indices of shape `(N,)`, dtype integer.
+        pre_nms_k (int, optional): If provided, keep only the top-`k` by `scores`
+            before NMS to reduce computation. Defaults to `500`.
+        post_nms_k (int, optional): If provided, keep only the top-`k` by decayed
+            scores after NMS. If `None`, keep all above the threshold. Defaults to `100`.
+        score_threshold (float, optional): Minimum decayed score to keep a mask. Defaults to `0.5`.
+        sigma (float, optional): Gaussian decay parameter used in Matrix NMS. Defaults to `0.5`.
 
     Returns:
-      tf.Tensor: Indices (into the original `masks/scores/labels` tensors) of the
-      kept detections after Matrix NMS, shape `(M,)`, dtype `int32`.
+        tf.Tensor: Indices (into the original `masks/scores/labels` tensors) of the
+        kept detections after Matrix NMS, shape `(M,)`, dtype `int32`.
 
     Notes:
-      * IoU is computed on binarized masks (`>= 0.5`).
-      * Suppression is class-aware; cross-class pairs do not contribute to decay.
+        * IoU is computed on binarized masks (`>= 0.5`).
+        * Suppression is class-aware; cross-class pairs do not contribute to decay.
     """
     # Binarize masks at 0.5 threshold
     seg_masks = tf.cast(masks >= 0.5, dtype=tf.float32)  # shape: (N, H, W)
@@ -154,7 +152,7 @@ def matrix_nms(masks, scores, labels, pre_nms_k=500, post_nms_k=100, score_thres
 #@tf.function
 def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold):
     """
-    Convert SOLO head outputs into per-instance masks/scores/classes.
+    Convert model head outputs into per-instance masks/scores/classes.
 
     This function gathers all grid-cell/class pairs whose classification
     probability exceeds `score_threshold`, upsamples their corresponding mask
@@ -166,15 +164,13 @@ def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
         resized_w (int): Width of the resized/reference image for masks.
         cate_preds (tf.Tensor): Category logits of shape `[1, sum(S_i*S_i), C]` where `C` includes background at index 0.
         mask_preds (tf.Tensor): Mask kernels of shape `[1, H_l, W_l, sum(S_i*S_i)]`.
-        mask_feat (tf.Tensor): Mask features of shape `[1, H_l, W_l, E]`.
         score_threshold (float): Minimum class probability to keep a (cell, class) candidate.
 
     Returns:
-        Tuple[tf.Tensor, tf.Tensor, tf.Tensor]:
-        `(selected_masks, selected_scores, selected_classes)` where
-            * `selected_masks` has shape `(K, resized_h, resized_w)` with values in `[0, 1]` (after sigmoid + bilinear upsampling).
-            * `selected_scores` has shape `(K,)` with per-instance class probabilities (after softmax over classes, background removed).
-            * `selected_classes` has shape `(K,)` with zero-based foreground class indices (i.e., background class 0 is excluded).
+        tuple: A tuple containing:
+            - selected_masks (tf.Tensor): Shape `(K, resized_h, resized_w)` with values in `[0, 1]` (after sigmoid + bilinear upsampling).
+            - selected_scores (tf.Tensor): Shape `(K,)` with per-instance class probabilities (after softmax over classes, background removed).
+            - selected_classes (tf.Tensor): Shape `(K,)` with zero-based foreground class indices (i.e., background class 0 is excluded).
 
     Notes:
         * If no candidate passes the threshold, returns three empty tensors.
@@ -196,7 +192,6 @@ def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
     cate_prob = cate_prob[..., 1:]
 
     # Threshold in one shot (multi-label)
-    # mask_bool[i, j] = True if cate_prob[i, j] >= threshold
     mask_bool = cate_prob >= tf.cast(score_threshold, tf.float32)  # shape (S_l*S_l, C)
 
     # Get indices of (cell, class) pairs and their scores
@@ -214,7 +209,6 @@ def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
         selected_cells = tf.cast(idx[:, 0], tf.int32)  # [K]
 
         # Resize all S mask channels once (vectorized), then gather
-        # mask_prob: [H_l, W_l, S] -> [K, H_l, W_l, 1] for tf.image.resize
         masks = tf.gather(mask_prob, selected_cells, axis=-1)  # [H_l, W_l, K]
         masks = tf.transpose(masks, [2, 0, 1])  # [K, H_l, W_l]
         masks = masks[..., tf.newaxis]  # [K, H_l, W_l, 1]
@@ -231,7 +225,7 @@ def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
     return tf.cond(tf.shape(idx)[0] > 0, _non_empty, _empty)
 
 
-def postprocess_solo_outputs(
+def postprocess_model_outputs(
     cate_preds,          # Tensor of shape [1, sum(S_i*S_i), C]
     mask_preds,          # Tensor of shape [1, H_l, W_l, sum(S_i*S_i)]
     resized_image_shape, # (resized_h, resized_w)
@@ -239,7 +233,7 @@ def postprocess_solo_outputs(
     nms_sigma=0.5
 ):
     """
-    Convert raw SOLO outputs into final instance predictions.
+    Convert raw model outputs into final instance predictions.
 
     Runs candidate extraction (`get_instances`), applies Matrix NMS, and
     returns a sorted list of instance dictionaries compatible with downstream
@@ -248,18 +242,17 @@ def postprocess_solo_outputs(
     Args:
         cate_preds (tf.Tensor): Category logits of shape `[1, sum(S_i*S_i), C]`.
         mask_preds (tf.Tensor): Mask kernels of shape `[1, H_l, W_l, sum(S_i*S_i)]`.
-        mask_feat (tf.Tensor): Mask features of shape `[1, H_l, W_l, E]`.
-        resized_image_shape (Tuple[int, int]): `(resized_h, resized_w)` used for upsampling masks.
-        score_threshold (float, optional): Classification probability threshold for candidate selection. Defaults to `0.5`.
+        resized_image_shape (tuple): `(resized_h, resized_w)` used for upsampling masks.
+        score_threshold (float, optional): Classification probability threshold for candidate selection.
+            Defaults to `0.5`.
         nms_sigma (float, optional): Sigma parameter for Matrix NMS decay. Defaults to `0.5`.
 
     Returns:
-        List[dict]: A list of instances. Each item has keys:
-            * `"class_id"` (int): Zero-based class index (without background).
-            * `"score"` (float): Final post-NMS score.
-            * `"mask"` (np.ndarray): Binary mask of shape
-            `(resized_h, resized_w)`, `dtype=uint8` with values in `{0,1}`.
-        The list is sorted by descending `score`.
+        list: A sorted list of instance dictionaries. Each item has keys:
+            - `"class_id"` (int): Zero-based class index (without background).
+            - `"score"` (float): Final post-NMS score.
+            - `"mask"` (np.ndarray): Binary mask of shape `(resized_h, resized_w)`,
+              `dtype=uint8` with values in `{0,1}`.
 
     Notes:
         * If no candidates remain after thresholding/NMS, an empty list is returned.
@@ -291,7 +284,7 @@ def postprocess_solo_outputs(
     return instances
 
 
-def draw_solo_masks(
+def draw_instance_masks(
     original_image: np.ndarray,
     instances: list,
     show_labels=True,
@@ -304,10 +297,13 @@ def draw_solo_masks(
     requested, draws a class label near the first pixel of the mask.
 
     Args:
-        original_image (np.ndarray): Input image on which to draw. Typically **BGR** (OpenCV convention), `dtype=uint8`, shape `(H, W, 3)`.
-        instances (List[dict]): List of instance dicts as returned by `postprocess_solo_outputs` with keys `class_id`, `score`, and `mask` (binary `(h, w)` array).
+        original_image (np.ndarray): Input image on which to draw. Typically **BGR** (OpenCV convention),
+            `dtype=uint8`, shape `(H, W, 3)`.
+        instances (list): List of instance dicts as returned by `postprocess_model_outputs` with keys:
+            `class_id`, `score`, and `mask` (binary `(h, w)` array).
         show_labels (bool, optional): Whether to render text labels. Defaults to `True`.
-        class_names (Mapping[int, str] | Sequence[str] | None, optional): Mapping from class id to readable name. If provided and indexable by `class_id`, the corresponding name is used for the label.
+        class_names (dict, optional): Mapping from class id to readable name. If provided and indexable by
+            `class_id`, the corresponding name is used for the label. Defaults to None.
 
     Returns:
         np.ndarray: Annotated image (same shape and dtype as `original_image`).
@@ -320,7 +316,7 @@ def draw_solo_masks(
     orig_h, orig_w = vis_image.shape[:2]
 
     for inst in instances:
-        mask_resized = inst["mask"]  # (resized_h, resized_w) => {0,1}
+        mask_resized = inst["mask"]
         # Upsample to original image size
         mask_orig = cv2.resize(
             mask_resized.astype(np.uint8),
@@ -364,7 +360,7 @@ if gpus:
         print(e)
 
 if __name__ == '__main__':
-    cfg = DynamicSOLOConfig()
+    cfg = Mask2FormerConfig()
 
     classes_path = cfg.classes_path
     model_path = cfg.test_model_path
@@ -394,14 +390,9 @@ if __name__ == '__main__':
     path_dir = os.listdir('images/test')
 
     for k, filename in enumerate(path_dir):
-        # --- Preprocess ---
         image_path = f'images/test/{filename}'
         img_resized, (orig_h, orig_w), img_rgb = preprocess_image(image_path, input_size=input_shape[:2])
-        # img_resized:  resized to (input_size)
-        # (orig_h, orig_w): original image dims
-        # img_rgb: original image in RGB
 
-        # Expand dims for batch
         img_batch = np.expand_dims(img_resized, axis=0)
         img_batch = tf.convert_to_tensor(img_batch)
 
@@ -409,7 +400,7 @@ if __name__ == '__main__':
 
         # Postprocess All Levels (scales)
         all_instances = []
-        instances = postprocess_solo_outputs(
+        instances = postprocess_model_outputs(
             cate_preds=class_outputs,
             mask_preds=mask_outputs,
             resized_image_shape=input_shape[:2],
@@ -419,7 +410,7 @@ if __name__ == '__main__':
 
         # Draw an image for saving
         img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-        annotated_img = draw_solo_masks(img_bgr, instances, show_labels=True, class_names=coco_classes)
+        annotated_img = draw_instance_masks(img_bgr, instances, show_labels=True, class_names=coco_classes)
 
         # Save output
         output_filename = os.path.basename(image_path)

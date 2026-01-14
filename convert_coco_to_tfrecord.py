@@ -29,7 +29,6 @@ import io
 import json
 from pathlib import Path
 from typing import List, Tuple
-from coco_dataset import ann_to_mask
 import numpy as np
 from PIL import Image
 
@@ -171,8 +170,8 @@ def open_sharded_writers(output_pattern: str, num_shards: int):
     """
     Creates TFRecord writers for (optionally) sharded output.
 
-    If `num_shards == 1`, a single writer is created for `output_pattern`.
-    If `num_shards > 1` and `"{shard}"` is not in `output_pattern`, a suffix
+    If `num_shards` is 1, a single writer is created for `output_pattern`.
+    If `num_shards` > 1 and `"{shard}"` is not in `output_pattern`, a suffix
     `-{shard:05d}-of-{num_shards:05d}` plus the file suffix is appended.
 
     Args:
@@ -180,9 +179,9 @@ def open_sharded_writers(output_pattern: str, num_shards: int):
         num_shards (int): Number of shards to create (>= 1).
 
     Returns:
-        Tuple[List[tf.io.TFRecordWriter], Callable[[int], int]]:
-            - List of writers (length == `num_shards`).
-            - A formatter function mapping an item index to a writer index (0..num_shards-1).
+        tuple: A tuple containing:
+            - writers (list): List of tf.io.TFRecordWriter objects (length == `num_shards`).
+            - formatter (callable): A function mapping an item index to a writer index (0..num_shards-1).
     """
     if num_shards < 1:
         raise ValueError("num_shards must be >= 1")
@@ -245,8 +244,8 @@ def build_example(
     mask_pngs: List[bytes] = []
 
     for ann in anns:
-        # bbox
-        xmin, ymin, xmax, ymax = coco_bbox_to_xyxy(ann["bbox"])  # COCO bbox: [x,y,w,h]
+        # Bbox
+        xmin, ymin, xmax, ymax = coco_bbox_to_xyxy(ann["bbox"])
         xmins.append(xmin)
         ymins.append(ymin)
         xmaxs.append(xmax)
@@ -255,7 +254,7 @@ def build_example(
         cat_ids.append(int(ann["category_id"]))
         iscrowds.append(int(ann.get("iscrowd", 0)))
 
-        # mask -> PNG bytes
+        # Mask to PNG bytes
         mask = ann_to_mask(ann, height, width)
         mask_pngs.append(encode_mask_png(mask))
 
