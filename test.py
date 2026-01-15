@@ -383,7 +383,20 @@ if __name__ == '__main__':
         dim_feedforward=1024
     )
     model.build((None, img_height, img_width, 3))
-    model.load_weights(model_path)
+
+    checkpoint = tf.train.Checkpoint(model=model)
+    # Check if model_path is a directory (default CheckpointManager dir) or specific file
+    if os.path.isdir(model_path):
+        latest = tf.train.latest_checkpoint(model_path)
+        if latest:
+            checkpoint.restore(latest).expect_partial()
+            print(f"Restored model from {latest}")
+        else:
+            raise FileNotFoundError(f"No checkpoint found in directory {model_path}")
+    else:
+        # Assume it's a specific checkpoint file (e.g. prefix-1)
+        checkpoint.restore(model_path).expect_partial()
+        print(f"Restored model from {model_path}")
 
     if not os.path.exists('images/res/'): os.mkdir('images/res/')
     path_dir = os.listdir('images/test')

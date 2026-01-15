@@ -7,7 +7,6 @@ Description: This script performs the main actions for the training process.
 
 import os
 import logging
-import re
 import tensorflow as tf
 import tensorflow.keras.layers as layers
 from coco_dataset_optimized import create_coco_tfrecord_dataset, get_classes
@@ -32,19 +31,7 @@ if gpus:
 
 os.environ["TF_GPU_ALLOCATOR"] = "cuda_malloc_async"
 
-def extract_epoch_number(file_name):
-    """
-    Extract the epoch number from a saved Keras weight filename.
 
-    Expects filenames that match the pattern `"...epoch{N}.keras"`.
-
-    Args:
-        file_name (str): Filename to parse, e.g. `"mask2former_epoch00000001.keras"`.
-
-    Returns:
-        int: The extracted epoch number.
-    """
-    return int(re.search(r'epoch(\d+)\.keras', file_name).group(1))
 
 def train_one_epoch(model, dataset, optimizer, num_classes):
     """
@@ -262,34 +249,36 @@ if __name__ == '__main__':
     batch_size = cfg.batch_size
     img_height, img_width = cfg.img_height, cfg.img_width
 
-    previous_epoch = 0
-    # Load previous model if load_previous_model = True
-    load_previous_model = cfg.load_previous_model
-    if load_previous_model:
-        # Create a model instance because of NGC's TensorFlow version
-        model = Mask2FormerModel(
-            input_shape=(img_height, img_width, 3),
-            transformer_input_channels=256,
-            num_classes=num_classes,
-            num_queries=100,
-            num_decoder_layers=6,
-            num_heads=8,
-            dim_feedforward=1024
-        )
-        model.build((None, img_height, img_width, 3))
-        model.load_weights(cfg.model_path)
-        previous_epoch = extract_epoch_number(cfg.model_path)
+    # Create a model instance
+    model = Mask2FormerModel(
+        input_shape=(img_height, img_width, 3),
+        transformer_input_channels=256,
+        num_classes=num_classes,
+        num_queries=100,
+        num_decoder_layers=6,
+        num_heads=8,
+        dim_feedforward=1024
+    )
+    model.build((None, img_height, img_width, 3))
+
+    #optimizer = tf.keras.optimizers.SGD(learning_rate=cfg.lr, momentum=0.9)
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=cfg.lr, weight_decay=0.05)
+
+    # Checkpoint mechanism
+    epoch_var = tf.Variable(0, trainable=False, dtype=tf.int64)
+    checkpoint = tf.train.Checkpoint(optimizer=optimizer, model=model, epoch=epoch_var)
+    manager = tf.train.CheckpointManager(checkpoint, directory='./checkpoints', max_to_keep=10)
+
+    if cfg.load_previous_model:
+        if manager.latest_checkpoint:
+            checkpoint.restore(manager.latest_checkpoint)
+            print(f"Restored from {manager.latest_checkpoint}")
+        else:
+            raise FileNotFoundError(f"Load previous model is True but no checkpoint found in {manager.directory}")
     else:
-        model = Mask2FormerModel(
-            input_shape=(img_height, img_width, 3),
-            transformer_input_channels=256,
-            num_classes=num_classes,
-            num_queries=100,
-            num_decoder_layers=6,
-            num_heads=8,
-            dim_feedforward=1024
-        )
-        model.build((None, img_height, img_width, 3))
+        print("Starting from scratch.")
+
+    previous_epoch = int(epoch_var.numpy())
 
     if previous_epoch > cfg.epochs:
         print(f'The model is trained {previous_epoch} epochs already while configuration assumes {cfg.epochs} epochs.')
@@ -305,30 +294,19 @@ if __name__ == '__main__':
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         number_images=cfg.number_images)
 
-    #optimizer = tf.keras.optimizers.SGD(learning_rate=cfg.lr, momentum=0.9)
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=cfg.lr, weight_decay=0.05)
-
     # Training loop
     print("Starting training...")
-    for epoch in range(previous_epoch + 1, cfg.epochs):
+    for epoch in range(previous_epoch + 1, cfg.epochs + 1):
         print(f"Starting epoch {epoch}:")
         if cfg.use_gradient_accumulation_steps:
             run_one_epoch_accumulated_mode(model, ds, optimizer, num_classes, accumulation_steps=cfg.accumulation_steps)
         else:
             train_one_epoch(model, ds, optimizer, num_classes)
-        if epoch != 0 and epoch % cfg.save_iter == 0:
-            save_path = f'./weights/{cfg.model_weights_prefix}_epoch%.8d.keras' % epoch
-            model.save(save_path)
-            path_dir = os.listdir('./weights')
-            epoch_numbers = []
-            names = []
-            for name in path_dir:
-                if name.endswith('.keras') and name.startswith(cfg.model_weights_prefix):
-                    epoch_number = extract_epoch_number(name)
-                    epoch_numbers.append(epoch_number)
-                    names.append(name)
-            if len(epoch_numbers) > 10:
-                i = epoch_numbers.index(min(epoch_numbers))
-                os.remove('./weights/' + names[i])
-            logger.info('Save model to {}'.format(save_path))
+
+        # Update epoch variable
+        epoch_var.assign(epoch)
+
+        if epoch % cfg.save_iter == 0:
+            save_path = manager.save()
+            logger.info('Saved checkpoint for epoch {}: {}'.format(epoch, save_path))
     print("Done!")

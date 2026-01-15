@@ -26,11 +26,11 @@ class Mask2FormerConfig(object):
         self.img_width = 480
 
         # If load_previous_model = True: load the previous model weights (example: './weights/coco_epoch00001000.keras')
-        self.load_previous_model = True
+        self.load_previous_model = False
         self.lr = 0.0001
         self.batch_size = 8
-        # If load_previous_model = True, you need to specify self.model_path to indicate which model to read the weights from to continue training.
-        self.model_path = './weights/coco_epoch00000014.keras'
+        # If load_previous_model = True, the code will look for the latest checkpoint in this directory or use this path if it is a specific checkpoint file.
+        self.model_path = './checkpoints'
 
         # Save the model weights every save_iter epochs:
         self.save_iter = 1
@@ -43,7 +43,7 @@ class Mask2FormerConfig(object):
         self.augment = True
 
         # Testing configuration
-        self.test_model_path = './weights/coco_epoch00000014.keras'
+        self.test_model_path = './checkpoints'
         self.score_threshold = 0.5
 
         # Accumulation mode
