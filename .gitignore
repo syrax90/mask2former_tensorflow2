@@ -1,6 +1,6 @@
 # Virtualenv
-/.venv/
-/venv/
+.venv/
+venv/
 
 .idea/
 .vscode/
@@ -9,6 +9,8 @@
 .debug/
 .temp/
 .images/
+.antigravity/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -16,9 +18,10 @@ __pycache__/
 
 images/*
 images/test/*
-weights/*
-/archives/
-/data/coco_classes.txt
+weights/
+archives/
+checkpoints/
+data/coco_classes.txt
 
 
 # exceptions
