@@ -31,9 +31,8 @@ from pathlib import Path
 from typing import List, Tuple
 import numpy as np
 from PIL import Image
-
+from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
-
 import tensorflow as tf
 
 
@@ -99,6 +98,38 @@ def _float_list_feature(values: List[float]) -> tf.train.Feature:
         tf.train.Feature: A feature with `float_list` set to `values`.
     """
     return tf.train.Feature(float_list=tf.train.FloatList(value=list(values)))
+
+def ann_to_mask(ann, height, width):
+    """
+    Converts a COCO annotation into a binary mask (0 or 1). Supports both polygon and RLE formats.
+
+    Args:
+        ann (dict): COCO-style annotation dictionary containing a 'segmentation' field.
+            Can be a list of polygons or an RLE (Run-Length Encoding) dict.
+        height (int): Height of the output mask.
+        width (int): Width of the output mask.
+
+    Returns:
+        np.ndarray: A binary mask of shape (height, width), where 1 indicates the object and 0 the background.
+
+    Raises:
+        TypeError: If the segmentation format is not a list or dict.
+    """
+    segm = ann['segmentation']
+    if isinstance(segm, list):
+        rles = coco_mask.frPyObjects(segm, height, width)
+        rle = coco_mask.merge(rles)
+    elif isinstance(segm, dict):
+        # RLE
+        rle = segm
+    else:
+        raise TypeError("Unknown segmentation format.")
+
+    mask = coco_mask.decode(rle)
+    # If multiple segments => combine
+    if len(mask.shape) == 3:
+        mask = np.any(mask, axis=2).astype(np.uint8)
+    return mask
 
 
 def encode_mask_png(mask: np.ndarray) -> bytes:

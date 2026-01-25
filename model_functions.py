@@ -34,7 +34,7 @@ def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
     backbone = ResNet50(
         weights="imagenet", include_top=False, input_shape=input_shape
     )
-    backbone.trainable = False
+    backbone.trainable = True
 
     # ResNet feature maps
     c2_output = backbone.get_layer("conv2_block3_out").output  # stride 4

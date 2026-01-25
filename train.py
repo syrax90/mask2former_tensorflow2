@@ -270,11 +270,15 @@ if __name__ == '__main__':
     manager = tf.train.CheckpointManager(checkpoint, directory='./checkpoints', max_to_keep=10)
 
     if cfg.load_previous_model:
-        if manager.latest_checkpoint:
-            checkpoint.restore(manager.latest_checkpoint)
-            print(f"Restored from {manager.latest_checkpoint}")
+        checkpoint_path = cfg.model_path
+        if os.path.isdir(checkpoint_path):
+            checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
+
+        if checkpoint_path:
+            checkpoint.restore(checkpoint_path).expect_partial()
+            print(f"Restored from {checkpoint_path}")
         else:
-            raise FileNotFoundError(f"Load previous model is True but no checkpoint found in {manager.directory}")
+            raise FileNotFoundError(f"Load previous model is True but no checkpoint found in {cfg.model_path}")
     else:
         print("Starting from scratch.")
 

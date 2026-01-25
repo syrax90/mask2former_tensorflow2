@@ -26,11 +26,11 @@ class Mask2FormerConfig(object):
         self.img_width = 480
 
         # If load_previous_model = True: load the previous model weights (example: './weights/coco_epoch00001000.keras')
-        self.load_previous_model = False
+        self.load_previous_model = True
         self.lr = 0.0001
         self.batch_size = 8
         # If load_previous_model = True, the code will look for the latest checkpoint in this directory or use this path if it is a specific checkpoint file.
-        self.model_path = './checkpoints'
+        self.model_path = './checkpoints'  # example for specific checkpoint: self.model_path = './checkpoints/ckpt-5'
 
         # Save the model weights every save_iter epochs:
         self.save_iter = 1
@@ -43,7 +43,7 @@ class Mask2FormerConfig(object):
         self.augment = True
 
         # Testing configuration
-        self.test_model_path = './checkpoints'
+        self.test_model_path = './checkpoints'  # example for specific checkpoint: self.test_model_path = './checkpoints/ckpt-5'
         self.score_threshold = 0.5
 
         # Accumulation mode
@@ -52,4 +52,5 @@ class Mask2FormerConfig(object):
 
         # Dataset options
         self.tfrecord_dataset_directory_path = f'{self.coco_root_path}/tfrecords/train'  # Path to TFRecord dataset directory
+        self.tfrecord_test_path = f'{self.coco_root_path}/tfrecords/test'  # Path to TFRecord test dataset directory
         self.shuffle_buffer_size = 4096  # TFRecord dataset shuffle buffer size. Set to None to disable shuffling
