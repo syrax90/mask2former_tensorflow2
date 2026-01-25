@@ -386,17 +386,15 @@ if __name__ == '__main__':
 
     checkpoint = tf.train.Checkpoint(model=model)
     # Check if model_path is a directory (default CheckpointManager dir) or specific file
-    if os.path.isdir(model_path):
-        latest = tf.train.latest_checkpoint(model_path)
-        if latest:
-            checkpoint.restore(latest).expect_partial()
-            print(f"Restored model from {latest}")
-        else:
-            raise FileNotFoundError(f"No checkpoint found in directory {model_path}")
+    checkpoint_path = model_path
+    if os.path.isdir(checkpoint_path):
+        checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
+
+    if checkpoint_path:
+        checkpoint.restore(checkpoint_path).expect_partial()
+        print(f"Restored from {checkpoint_path}")
     else:
-        # Assume it's a specific checkpoint file (e.g. prefix-1)
-        checkpoint.restore(model_path).expect_partial()
-        print(f"Restored model from {model_path}")
+        raise FileNotFoundError(f"Load previous model is True but no checkpoint found in {model_path}")
 
     if not os.path.exists('images/res/'): os.mkdir('images/res/')
     path_dir = os.listdir('images/test')

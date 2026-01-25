@@ -122,7 +122,7 @@ def calculate_match_costs(pred_cls, gt_cls, pred_mask_logits, gt_mask,
 
 # Loss Functions
 
-def focal_loss(logits, targets, alpha=None, gamma=2.0, eps=1e-7):
+def focal_loss(logits, targets, alpha=None, gamma=2.0):
     """
     Computes sigmoid/softmax focal loss.
 
@@ -131,7 +131,6 @@ def focal_loss(logits, targets, alpha=None, gamma=2.0, eps=1e-7):
         targets (tf.Tensor): Target labels (one-hot encoded).
         alpha (tf.Tensor, optional): Class weights. Defaults to None (uses dynamic weighting).
         gamma (float): Focusing parameter. Defaults to 2.0.
-        eps (float): Small epsilon for numerical stability. Defaults to 1e-7.
 
     Returns:
         tf.Tensor: Scalar focal loss value.
@@ -239,8 +238,8 @@ def mask2former_loss(
         valid_counts,       # [B]
         gt_is_padding,      # [B, M]
         cls_loss_weight=2.0,
-        mask_loss_weight=1.0,
-        dice_loss_weight=1.0
+        mask_loss_weight=5.0,
+        dice_loss_weight=5.0
 ):
     """
     Calculates Mask2Former loss efficiently.
@@ -292,7 +291,7 @@ def mask2former_loss(
 
     # Classification loss for all queries
     expanded_targets = expand_targets(cls_target_sorted, row_indices, col_indices, B, N)
-    loss_cls = focal_loss(cls_pred, expanded_targets)
+    loss_cls = focal_loss(cls_pred, expanded_targets, alpha=0.5)
 
     # Mask losses for matched pairs only
     batch_ids = row_indices.value_rowids()
