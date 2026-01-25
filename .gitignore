@@ -9,7 +9,7 @@ venv/
 .debug/
 .temp/
 .images/
-.antigravity/
+.agent/
 
 
 # Byte-compiled / optimized / DLL files
