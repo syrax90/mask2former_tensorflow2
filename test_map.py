@@ -5,11 +5,35 @@ Description: This script calculates Mean Average Precision (mAP) for the Mask2Fo
 """
 
 import os
+import json
 import time
 import tensorflow as tf
 from config import Mask2FormerConfig
 from coco_dataset_optimized import create_coco_tfrecord_dataset, get_classes
 from model_functions import Mask2FormerModel
+
+
+def get_dataset_to_model_map_from_json(json_path, num_classes, classes_path):
+    """
+    Creates a mapping tensor from Dataset IDs to Model IDs.
+    
+    Since the user has confirmed that the dataset indices are already 0-based and 
+    aligned with `model_class_names`, this function simply returns an identity map.
+    
+    Args:
+        json_path (str): Unused. Kept for compatibility.
+        num_classes (int): Number of classes.
+        classes_path (str): Unused. Kept for compatibility.
+
+    Returns:
+        tf.Tensor: Identity mapping tensor of shape [num_classes + safety_buffer].
+    """
+    # Assume dataset IDs are already 0..num_classes-1 and match model classes.
+    # We provide a large enough identity map just in case.
+    # Size: num_classes + some buffer to avoid OOB on unexpected inputs (though they should be filtered)
+    map_size = num_classes + 1
+    return tf.range(map_size, dtype=tf.int32)
+
 
 # Function to compute Intersection over Union (IoU)
 @tf.function(reduce_retracing=True)
@@ -55,6 +79,7 @@ def process_single_image_predictions(
     pred_logits, pred_masks,
     gt_cate_dataset, gt_mask_dataset,
     target_height, target_width,
+    label_map,
     score_threshold=0.0
 ):
     """
@@ -62,50 +87,33 @@ def process_single_image_predictions(
     Run in Graph Mode.
 
     Args:
-        pred_logits: [Q, num_classes+1]
-        pred_masks:  [Q, H_feat, W_feat]
-        gt_cate:     [sum(S_i^2)] (flat list of categories for grid cells) - NOT USED directly here
-                     Wait, the input from dataset is just `cate_target` which is per-grid-cell.
-                     We need per-instance GT for evaluation.
-
-                     The metric evaluation usually compares *predicted instances* vs *ground truth instances*.
-                     The dataset pipeline `create_coco_tfrecord_dataset` outputs *training targets*
-                     (dense grid targets), NOT the raw sparse ground truth instances needed for evaluation.
-
-                     However, the task request says:
-                     "Use create_coco_tfrecord_dataset without shuffling and augmentation."
-
-                     So we must reconstruct "GT instances" from the grid targets or accept that
-                     we are evaluating against the grid-assigned targets.
-
-                     Let's look at `create_coco_tfrecord_dataset`. It returns:
-                        - cate_targets: [B, sum(S_i^2)]
-                        - mask_targets: [B, Hf, Wf, sum(S_i^2)]
-
-                     The `mask_targets` channel dimension IS the number of grid assignments.
-                     `cate_targets` holds the class ID for each channel.
-                     Typically many are -1 (no object). We should filter those out to get the "GT objects".
-
-        target_height: int
-        target_width: int
-        score_threshold: float
+        pred_logits (tf.Tensor): [Q, num_classes+1]. Output logits.
+                                 Index 0 is background (ignored).
+                                 Indices 1..N are classes 0..N-1.
+        pred_masks (tf.Tensor):  [Q, H_feat, W_feat]. Predicted masks.
+        gt_cate_dataset (tf.Tensor): [K]. GT labels from dataset (Dataset IDs).
+        gt_mask_dataset (tf.Tensor): [Hf, Wf, K]. GT masks from dataset.
+        target_height (int): Target height for IoU calculation.
+        target_width (int): Target width for IoU calculation.
+        label_map (tf.Tensor): Label mapping tensor.
+        score_threshold (float): Threshold to filter low-confidence predictions.
 
     Returns:
-        pred_scores: [N_kept]
-        pred_classes: [N_kept]
-        iou_matrix: [N_kept, N_gt_instances]
-        gt_classes: [N_gt_instances]
+        tuple: (pred_scores, pred_labels, iou_matrix, gt_labels_mapped)
     """
 
     # --- 1. Process Predictions ---
-    # Softmax on classes
-    scores = tf.nn.softmax(pred_logits, axis=-1)[:, :-1] # [Q, num_classes] (exclude background)
+    # Model Output: [Background, Class0, Class1, ...]
+    # We want to keep only Foreground classes.
+    # Scores: Discard index 0 (Background). Keep 1..end.
+    scores_fg = tf.nn.softmax(pred_logits, axis=-1)[:, 1:] # [Q, num_classes] (Indices 1..N are mapped to 0..N-1)
 
     # Get max score and class per query
-    max_scores = tf.reduce_max(scores, axis=-1)
-    pred_labels = tf.argmax(scores, axis=-1)
+    max_scores = tf.reduce_max(scores_fg, axis=-1)
+    # argmax gives index in generic [0..79] space, which is what we want
+    pred_labels = tf.argmax(scores_fg, axis=-1, output_type=tf.int32)
 
-    # Filter by score threshold (optional, or keep top K)
+    # Filter by score threshold
     keep_indices = tf.where(max_scores > score_threshold)[:, 0]
 
     kept_scores = tf.gather(max_scores, keep_indices)
@@ -124,45 +132,56 @@ def process_single_image_predictions(
     pred_masks_bin = tf.cast(pred_masks_up > 0.0, tf.float32)
 
     # --- 2. Process Ground Truth ---
-    # gt_cate: [K_grid]
-    # gt_mask: [Hf, Wf, K_grid] -> Transpose to [K_grid, Hf, Wf] first?
-    # Wait, dataset outputs mask as [B, Hf, Wf, K]. One image: [Hf, Wf, K].
-
-    # Filter out empty targets (-1)
+    # Filter out empty targets (-1) from dataset
     valid_gt_indices = tf.where(gt_cate_dataset > -1)[:, 0]
 
-    gt_labels = tf.gather(gt_cate_dataset, valid_gt_indices)
-    gt_masks_grid = tf.gather(gt_mask_dataset, valid_gt_indices, axis=-1) # [Hf, Wf, N_gt]
+    gt_cats_raw = tf.gather(gt_cate_dataset, valid_gt_indices)
 
-    # The GT masks from dataset are already smaller scale (output of parse_example resizes them).
-    # But wait, `create_coco_tfrecord_dataset` resizes masks to `target_mask_height` which is `target_height * scale`.
-    # Prediction masks (from model) are typically low res (1/4 stride usually).
-    # To compute IoU accurately, we should bring both to the same size.
-    # The dataset `mask_targets` are resized to `scale` (e.g. 0.25).
-    # If `scale` in config is 0.25, then they are 1/4 size.
-    # The model output `pred_masks` is also low res.
-    # Matching them at low res is faster and sufficient for training, but for mAP we usually want input resolution.
-    # Let's upsample BOTH to `target_height, target_width` to be safe and standard.
+    # MAP Dataset IDs to Model IDs
+    # Safely gather from map
+    # Check bounds first? If generic dataset, IDs could be anything.
+    # Fallback to identify if map is small? No, dynamic map should be big enough or identity.
+    # We assume label_map covers the range.
 
-    gt_masks_grid_exp = tf.expand_dims(gt_masks_grid, 0) # [1, Hf, Wf, N_gt]
-    gt_masks_up = tf.image.resize(gt_masks_grid_exp, (target_height, target_width), method='nearest')
-    gt_masks_up = tf.squeeze(gt_masks_up, 0) # [H, W, N_gt]
+    gt_labels_mapped = tf.gather(label_map, gt_cats_raw) # [N_gt]
+
+    # Filter out GTs that mapped to -1 (invalid classes, e.g. "street sign" / missing IDs)
+    # This shouldn't happen if dataset is clean COCO, but safe to handle.
+    valid_mapped_mask = gt_labels_mapped > -1
+    gt_labels_final = tf.boolean_mask(gt_labels_mapped, valid_mapped_mask)
+    valid_gt_indices_final = tf.boolean_mask(valid_gt_indices, valid_mapped_mask)
+
+    # Fetch corresponding masks
+    gt_masks_grid = tf.gather(gt_mask_dataset, valid_gt_indices_final, axis=-1) # [Hf, Wf, N_gt]
+
+    # Check if we have any GT masks to resize
+    n_gt_active = tf.shape(gt_masks_grid)[-1]
+    
+    def resize_gt_masks():
+        gt_masks_grid_exp = tf.expand_dims(gt_masks_grid, 0) # [1, Hf, Wf, N_gt]
+        up = tf.image.resize(gt_masks_grid_exp, (target_height, target_width), method='nearest')
+        return tf.squeeze(up, 0) # [H, W, N_gt]
+
+    def empty_gt_masks():
+        return tf.zeros((target_height, target_width, 0), dtype=gt_masks_grid.dtype)
+
+    # If N_gt > 0, resize. Else return empty.
+    gt_masks_up = tf.cond(n_gt_active > 0, resize_gt_masks, empty_gt_masks)
+    
     gt_masks_up = tf.transpose(gt_masks_up, perm=[2, 0, 1]) # [N_gt, H, W]
 
     gt_masks_bin = tf.cast(tf.cast(gt_masks_up, tf.float32) > 0.5, tf.float32)
 
     # --- 3. Compute IoU ---
-    # If no predictions or no GT, return empty
-
     n_pred = tf.shape(kept_scores)[0]
-    n_gt = tf.shape(gt_labels)[0]
+    n_gt = tf.shape(gt_labels_final)[0]
 
     if n_pred == 0 or n_gt == 0:
-        return kept_scores, kept_labels, tf.zeros((n_pred, n_gt)), gt_labels
+        return kept_scores, kept_labels, tf.zeros((n_pred, n_gt)), gt_labels_final
 
     iou_mat = compute_iou(pred_masks_bin, gt_masks_bin) # [N_pred, N_gt]
 
-    return kept_scores, kept_labels, iou_mat, gt_labels
+    return kept_scores, kept_labels, iou_mat, gt_labels_final
 
 
 @tf.function
@@ -171,11 +190,11 @@ def compute_matches_tf(iou_matrix, iou_thresh):
     Greedy matching of predictions to ground truth using TensorFlow.
 
     Args:
-        iou_matrix: [N_dt, N_gt] float32. Rows are predictions (sorted), cols are GT.
-        iou_thresh: float scalar.
+        iou_matrix (tf.Tensor): [N_dt, N_gt] float32. Rows are predictions (sorted), cols are GT.
+        iou_thresh (float): IoU threshold.
 
     Returns:
-        dt_matched: [N_dt] bool.
+        tf.Tensor: dt_matched [N_dt] bool.
     """
     n_dt = tf.shape(iou_matrix)[0]
     n_gt = tf.shape(iou_matrix)[1]
@@ -215,6 +234,7 @@ def compute_matches_tf(iou_matrix, iou_thresh):
         new_gc, new_dm = tf.cond(has_valid, match_found, no_match)
         return i + 1, new_gc, new_dm
 
+    # Loop over all detections
     _, _, dt_matched_final = tf.while_loop(
         lambda i, g, d: i < n_dt,
         body,
@@ -237,7 +257,6 @@ class MAPEvaluator:
              self.iou_thresholds = tf.convert_to_tensor(self.iou_thresholds, dtype=tf.float32)
 
         # Storage: { cls_id: { 'scores': [list_of_tensors], 'tp': {thresh: [list_of_tensors]}, 'n_gt': int } }
-        # n_gt is just an integer counter, no need for tensor overhead there
         self.stats = {}
         for c in range(num_classes):
             self.stats[c] = {
@@ -245,26 +264,6 @@ class MAPEvaluator:
                 'tp': {t_idx: [] for t_idx in range(len(self.iou_thresholds))},
                 'n_gt': 0
             }
-
-    @tf.function(reduce_retracing=True)
-    def _compute_update_batch(self, pred_scores, pred_labels, iou_matrix, gt_labels):
-        """
-        Computes matches for a single batch (image) using TF graph.
-        Returns updates required for stats.
-        """
-        # Group by class
-        # Ideally we loop over classes present in the batch
-        # But for graph mode efficienty over fixed classes, we might need a fixed loop?
-        # Actually, dynamic loop over unique classes is better.
-
-        unique_classes, _ = tf.unique(tf.concat([pred_labels, gt_labels], axis=0))
-
-        # We can't return arbitrary structure easily.
-        # So we process everything here and return packed tensors?
-        # Or just return the raw needed data?
-        # Actually, `compute_matches_tf` needs to be called per class.
-
-        return unique_classes
 
     def update(self, pred_scores, pred_labels, iou_matrix, gt_labels):
         """
@@ -323,10 +322,12 @@ class MAPEvaluator:
 
     @tf.function(reduce_retracing=True)
     def _compute_ap_per_class(self, tp_cat, n_gt):
-        # tp_cat: [N_total_dt] bool
+        # tp_cat: [N_total_dt] bool (True if matched)
         # n_gt: int scalar (tensor)
 
         n_gt = tf.cast(n_gt, tf.float32)
+        if n_gt == 0:
+            return 0.0
 
         # In this sorted list (globally sorted), compute cumsum
         tp = tf.cast(tp_cat, tf.float32)
@@ -335,45 +336,45 @@ class MAPEvaluator:
         tp_sum = tf.cumsum(tp)
         fp_sum = tf.cumsum(fp)
 
+        # Precision and Recall
         recalls = tp_sum / n_gt
-        precisions = tp_sum / (tp_sum + fp_sum)
+        precisions = tp_sum / (tp_sum + fp_sum + 1e-6)
 
-        # Monotonic decreasing methods
-        # Reverse, accumulate max, reverse
-        precisions = tf.reverse(tf.math.cumprod(tf.reverse(precisions, axis=[0]), exclusive=False, reverse=False), axis=[0])
-        # Wait, cumprod is wrong. accumulated max!
-        # TF doesnt have naive accumulate_max.
-        # hack: scan?
+        # Monotonic decreasing precisions (accumulate max from right)
+        # p_i = max(p_i, p_{i+1}, ...)
+        # Scan reverse with max
         precisions = tf.scan(lambda a, x: tf.maximum(a, x), precisions, reverse=True)
 
-        # 101-point AP
+        # Add 0, 1 endpoints for interpolation?
+        # COCO 101-point method evaluates at r=0.00, 0.01, ... 1.00
+        # Definition: AP = mean(Precision(r)) for r in 0:0.01:1
+        # Precision(r) = max(precision(r') for r' >= r)
+
         recall_steps = tf.linspace(0.0, 1.0, 101)
 
-        # For each step, find max precision with recall >= step
-        # Since precisions is monotonic (processed above) and recalls is increasing:
-        # We can find index where recall >= step
+        # Find indices where recalls >= step
+        # recalls is monotonic increasing (mostly)? Yes, tp_sum increases.
+        # But we need to handle the case efficiently.
+        # tf.searchsorted requires sorted input.
 
-        # searchsorted works on sorted sequences. recalls is strictly increasing (mostly).
-        # indices = tf.searchsorted(recalls, recall_steps, side='left')
-
-        # BUT: recalls might not be strictly increasing if tp doesn't change?
-        # No, tp_sum is non-decreasing. recall is non-decreasing.
+        # We can prepend 0 to recalls and precisions to ensure start range?
+        # Actually standard searchsorted on recalls is fine.
 
         indices = tf.searchsorted(recalls, recall_steps, side='left')
 
-        # Gather precisions
-        # If index == len, output 0
+        # Gather precisions at these indices
         N = tf.shape(precisions)[0]
-
-        # Handle out of bounds
         indices_clipped = tf.minimum(indices, N - 1)
-        gathered = tf.gather(precisions, indices_clipped)
 
-        # If index was N (not found), value should be 0.
+        gathered_precisions = tf.gather(precisions, indices_clipped)
+
+        # If the found index is N (meaning step > max_recall), the precision is 0.
+        # Unless max_recall == 1.0 ?
+        # Generally if we haven't reached that recall, precision is 0.
         mask = indices < N
-        gathered = tf.where(mask, gathered, 0.0)
+        gathered_precisions = tf.where(mask, gathered_precisions, 0.0)
 
-        return tf.reduce_mean(gathered)
+        return tf.reduce_mean(gathered_precisions)
 
     def calculate_map(self):
         aps = []
@@ -384,7 +385,6 @@ class MAPEvaluator:
                 continue
 
             # Global sort for this class
-            # We have list of score tensors. Concat them.
             scores_list = self.stats[cls_id]['scores']
             if not scores_list:
                 aps.append(0.0)
@@ -440,8 +440,14 @@ def main():
     )
 
     # 3. Model
-    class_names = get_classes(cfg.classes_path)
-    num_classes = len(class_names)
+    # Get classes to determine count (should be 80 for COCO)
+    # If file missing, default to 80
+    if os.path.exists(cfg.classes_path):
+        class_names = get_classes(cfg.classes_path)
+        num_classes = len(class_names)
+    else:
+        print(f"Classes file {cfg.classes_path} not found. Defaulting to 80 classes.")
+        num_classes = 80
 
     model = Mask2FormerModel(
         input_shape=(cfg.img_height, cfg.img_width, 3),
@@ -476,6 +482,9 @@ def main():
 
     score_thresh = 0.05 # Optimization: ignore very low confidence predictions
 
+    # Init label map
+    label_map = get_dataset_to_model_map_from_json(cfg.train_annotation_path, num_classes, cfg.classes_path)
+
     start_time = time.time()
 
     # Inference
@@ -493,14 +502,13 @@ def main():
         pred_logits, pred_masks, _ = predict_step(image)
 
         # Squeeze batch dim since batch_size=1
-        img_single = image[0]
         # Process graph-optimized
         s, l, iou, gl = process_single_image_predictions(
             pred_logits[0], pred_masks[0],
             cate_target[0], mask_target[0],
             target_height=cfg.img_height,
             target_width=cfg.img_width,
-            num_classes=num_classes,
+            label_map=label_map,
             score_threshold=score_thresh
         )
 
