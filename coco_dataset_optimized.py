@@ -327,8 +327,10 @@ def parse_example(
     # Resize (bilinear by default; set method if you need a match)
     image_resized = tf.image.resize(img, size=(target_height, target_width), method="bilinear", antialias=True)
 
-    # Convert to float32 in [0, 1]
-    image_resized = tf.cast(image_resized, tf.float32) / 255.0
+    # Preprocess for ResNet50 (requires inputs in [0, 255] range but specific distribution)
+    # The original model expects "caffe" mode: BGR, zero-centered
+    image_resized = tf.cast(image_resized, tf.float32)
+    image_resized = tf.keras.applications.resnet50.preprocess_input(image_resized)
 
     # Resize masks to (target_height, target_width) using nearest neighbor
     target_mask_height = tf.cast(tf.round(target_height * scale), tf.int32)

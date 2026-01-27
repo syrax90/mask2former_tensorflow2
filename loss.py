@@ -7,10 +7,10 @@ Description: This script contains functions for the loss calculation.
 import tensorflow as tf
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-
+from concurrent.futures import ThreadPoolExecutor
+import os
 
 # Graph-Compatible Hungarian Matcher
-
 def batched_linear_sum_assignment(cost_matrix, valid_counts):
     """
     Solves the matching problem for a batch with variable number of valid targets.
@@ -24,47 +24,72 @@ def batched_linear_sum_assignment(cost_matrix, valid_counts):
             - row_indices (tf.RaggedTensor): Indices into N, shape [B, (matches)].
             - col_indices (tf.RaggedTensor): Indices into M, shape [B, (matches)].
     """
-    def solve_hungarian(cost, counts):
-        b = cost.shape[0]
 
-        row_list = []
-        col_list = []
-        row_lengths = []
-
-        for i in range(b):
-            cnt = counts[i]
-            if cnt > 0:
-                # Slice only valid targets [N, cnt]
-                c_valid = cost[i, :, :cnt]
-                r, c = linear_sum_assignment(c_valid)
-                row_list.append(r.astype(np.int32))
-                col_list.append(c.astype(np.int32))
-                row_lengths.append(len(r))
-            else:
-                row_lengths.append(0)
-
-        # Concatenate for RaggedTensor reconstruction
-        flat_rows = np.concatenate(row_list) if row_list else np.array([], dtype=np.int32)
-        flat_cols = np.concatenate(col_list) if col_list else np.array([], dtype=np.int32)
-
-        return flat_rows, flat_cols, np.array(row_lengths, dtype=np.int32)
-
-    # Execute inside py_function
-    flat_rows, flat_cols, row_lengths = tf.py_function(
+    # Execute inside tf.numpy_function.
+    flat_rows, flat_cols, row_lengths = tf.numpy_function(
         func=solve_hungarian,
         inp=[cost_matrix, valid_counts],
         Tout=[tf.int32, tf.int32, tf.int32]
     )
 
-    # Reconstruct RaggedTensors
+    # Ensure shapes are set because numpy_function returns <unknown> shapes
+    flat_rows.set_shape([None])
+    flat_cols.set_shape([None])
+    row_lengths.set_shape([None])
+
     row_indices = tf.RaggedTensor.from_row_lengths(flat_rows, row_lengths)
     col_indices = tf.RaggedTensor.from_row_lengths(flat_cols, row_lengths)
 
     return row_indices, col_indices
 
 
-# Optimized Cost Calculation
+def solve_hungarian(cost, counts):
+    """
+    The CPU-bound logic execution.
+    Inputs are already numpy arrays here (thanks to tf.numpy_function).
+    """
+    b = cost.shape[0]
 
+    # Never spawn more threads than physical cores.
+    # If batch size is small, don't waste overhead creating threads for nothing.
+    num_workers = min(b, os.cpu_count() or 1)
+
+    def process_one(i):
+        cnt = counts[i]
+        if cnt > 0:
+            # Slice only valid targets [N, cnt]
+            cost_i = cost[i, :, :cnt]
+
+            r, c = linear_sum_assignment(cost_i)
+            return r.astype(np.int32), c.astype(np.int32), len(r)
+        else:
+            return np.array([], dtype=np.int32), np.array([], dtype=np.int32), 0
+
+    # ThreadPool Logic
+    if num_workers > 1:
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # map ensures results are returned in order (0 to b-1)
+            results = list(executor.map(process_one, range(b)))
+    else:
+        # Fallback to sequential execution for small batches/single core
+        # This avoids ThreadPool setup overhead entirely
+        results = [process_one(i) for i in range(b)]
+
+    if not results:
+        return (np.array([], dtype=np.int32),
+                np.array([], dtype=np.int32),
+                np.array([], dtype=np.int32))
+
+    row_list, col_list, len_list = zip(*results)
+
+    flat_rows = np.concatenate(row_list) if row_list else np.array([], dtype=np.int32)
+    flat_cols = np.concatenate(col_list) if col_list else np.array([], dtype=np.int32)
+    row_lengths = np.array(len_list, dtype=np.int32)
+
+    return flat_rows, flat_cols, row_lengths
+
+
+# Cost Calculation
 def calculate_match_costs(pred_cls, gt_cls, pred_mask_logits, gt_mask,
                           lambda_cls=2.0, lambda_ce=5.0, lambda_dice=5.0):
     """

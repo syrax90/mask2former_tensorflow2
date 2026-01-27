@@ -261,8 +261,52 @@ if __name__ == '__main__':
     )
     model.build((None, img_height, img_width, 3))
 
-    #optimizer = tf.keras.optimizers.SGD(learning_rate=cfg.lr, momentum=0.9)
-    optimizer = tf.keras.optimizers.AdamW(learning_rate=cfg.lr, weight_decay=0.05)
+    # Learning Rate Schedule
+    # Estimate total steps for CosineDecay
+    if cfg.number_images:
+        total_steps = (cfg.number_images // cfg.batch_size) * cfg.epochs
+    else:
+        # If number_images is not set, we assume the full COCO 2017 training set size (~118k images).
+        # This provides a reasonable 'decay_steps' scale for the scheduler even if the exact number varies slightly.
+        steps_per_epoch = cfg.approx_coco_train_size // cfg.batch_size
+        total_steps = steps_per_epoch * cfg.epochs
+
+    warmup_steps = cfg.warmup_steps
+    initial_learning_rate = cfg.lr
+
+    # Scheduler
+    lr_schedule = tf.keras.optimizers.schedules.CosineDecay(
+        initial_learning_rate,
+        decay_steps=total_steps - warmup_steps,
+        alpha=0.01
+    )
+
+
+    class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
+        def __init__(self, warmup_steps, target_lr, decay_schedule):
+            super(WarmUp, self).__init__()
+            self.warmup_steps = warmup_steps
+            self.target_lr = target_lr
+            self.decay_schedule = decay_schedule
+
+        def __call__(self, step):
+            return tf.cond(
+                step < self.warmup_steps,
+                lambda: self.target_lr * (tf.cast(step, tf.float32) / tf.cast(self.warmup_steps, tf.float32)),
+                lambda: self.decay_schedule(step - self.warmup_steps)
+            )
+
+        def get_config(self):
+            return {
+                "warmup_steps": self.warmup_steps,
+                "target_lr": self.target_lr,
+                "decay_schedule": self.decay_schedule
+            }
+
+
+    learning_rate = WarmUp(warmup_steps, initial_learning_rate, lr_schedule)
+
+    optimizer = tf.keras.optimizers.AdamW(learning_rate=learning_rate, weight_decay=0.05)
 
     # Checkpoint mechanism
     epoch_var = tf.Variable(0, trainable=False, dtype=tf.int64)

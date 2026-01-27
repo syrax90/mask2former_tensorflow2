@@ -52,7 +52,9 @@ def preprocess_image(image_path, input_size=(320, 320)):
 
     # Resize
     img_resized = cv2.resize(img, input_size)
-    img_resized = img_resized.astype(np.float32) / 255.0
+    # Replaced 0-1 scaling with ResNet50 preprocessing to match training data
+    img_resized = img_resized.astype(np.float32)
+    img_resized = tf.keras.applications.resnet50.preprocess_input(img_resized)
 
     return img_resized, original_shape, img
 
