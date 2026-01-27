@@ -34,8 +34,9 @@ class Mask2FormerConfig(object):
 
         # Save the model weights every save_iter epochs:
         self.save_iter = 1
+        self.approx_coco_train_size = 118287
         # Number of epochs
-        self.epochs = 30000
+        self.epochs = 100
         # Model weights file prefix
         self.model_weights_prefix = 'coco'
 
@@ -54,3 +55,4 @@ class Mask2FormerConfig(object):
         self.tfrecord_dataset_directory_path = f'{self.coco_root_path}/tfrecords/train'  # Path to TFRecord dataset directory
         self.tfrecord_test_path = f'{self.coco_root_path}/tfrecords/test'  # Path to TFRecord test dataset directory
         self.shuffle_buffer_size = 4096  # TFRecord dataset shuffle buffer size. Set to None to disable shuffling
+        self.warmup_steps = 10000
