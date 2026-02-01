@@ -88,7 +88,6 @@ def train_one_step(model, images, cate_target, mask_target, optimizer, num_class
     optimizer.apply_gradients(zip(grads, model.trainable_variables))
     return total_loss, cate_loss, dice_loss, mask_loss
 
-@tf.function
 def accumulate_one_step(model,
                         images,
                         cate_target,
@@ -114,15 +113,16 @@ def accumulate_one_step(model,
         tuple: A tuple containing:
             - total_l (tf.Tensor): Scalar total loss.
             - cate_l (tf.Tensor): Scalar classification loss.
+            - dice_loss (tf.Tensor): Scalar mask (Dice) loss.
             - mask_l (tf.Tensor): Scalar mask loss.
     """
     with tf.GradientTape() as tape:
         pred_logits, pred_masks, aux_outputs = model(images, training=True)
-        total_l, cate_l, mask_l = compute_multiscale_loss(
+        total_l, cate_l, dice_loss, mask_l = compute_multiscale_loss(
             pred_logits, pred_masks,
             cate_target, mask_target,
             aux_outputs=aux_outputs,
-            num_classes=tf.constant(num_classes)
+            num_classes=num_classes
         )
 
     grads = tape.gradient(total_l, model.trainable_variables)
@@ -132,9 +132,9 @@ def accumulate_one_step(model,
         if g is not None:
             g_acc.assign_add(g)
 
-    return total_l, cate_l, mask_l
+    return total_l, cate_l, dice_loss, mask_l
 
-@tf.function
+@tf.function(experimental_relax_shapes=True)
 def train_one_epoch_accumulated_mode(model,
                     dataset,
                     optimizer,
@@ -178,8 +178,8 @@ def train_one_epoch_accumulated_mode(model,
             g.assign(tf.zeros_like(g))
         accum_counter.assign(0)
 
-    for images, cate_target, mask_target in dataset:                     # AutoGraph → while_loop
-        tot, cat, msk = accumulate_one_step(
+    for images, cate_target, mask_target in dataset:
+        tot, cat, dice, msk = accumulate_one_step(
             model, images, cate_target, mask_target, num_classes, accum_grads)
 
         accum_counter.assign_add(1)
@@ -190,11 +190,11 @@ def train_one_epoch_accumulated_mode(model,
                 lambda: None)
 
         tf.print("step", global_step,
-                 ": total =", tot,
-                 "cate =", cat,
-                 "mask =", msk)
+                 ": total=", tot,
+                 "cate=", cat,
+                 "dice=", dice,
+                 "mask=", msk)
 
-    # Flush leftovers
     tf.cond(accum_counter > 0,
             lambda: _reset_counter(),
             lambda: None)
@@ -283,6 +283,18 @@ if __name__ == '__main__':
 
 
     class WarmUp(tf.keras.optimizers.schedules.LearningRateSchedule):
+        """
+        Learning rate schedule with a warmup period.
+
+        Linearly increases the learning rate from 0 to `target_lr` over `warmup_steps`,
+        then follows the `decay_schedule`.
+
+        Args:
+            warmup_steps (int): Number of steps for the warmup phase.
+            target_lr (float): Target learning rate after warmup.
+            decay_schedule (tf.keras.optimizers.schedules.LearningRateSchedule):
+                Schedule to follow after warmup.
+        """
         def __init__(self, warmup_steps, target_lr, decay_schedule):
             super(WarmUp, self).__init__()
             self.warmup_steps = warmup_steps

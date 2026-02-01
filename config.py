@@ -26,7 +26,7 @@ class Mask2FormerConfig(object):
         self.img_width = 480
 
         # If load_previous_model = True: load the previous model weights (example: './weights/coco_epoch00001000.keras')
-        self.load_previous_model = True
+        self.load_previous_model = False
         self.lr = 0.0001
         self.batch_size = 8
         # If load_previous_model = True, the code will look for the latest checkpoint in this directory or use this path if it is a specific checkpoint file.

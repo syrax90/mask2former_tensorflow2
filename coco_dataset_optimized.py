@@ -4,7 +4,6 @@ Created: 2025-10-17
 Description: This script contains classes and functions of COCO dataset optimized for tf.Dataset.
 """
 
-
 import os
 from typing import Optional, Tuple
 
@@ -31,9 +30,10 @@ _FEATURES = {
     "image/object/mask_png": tf.io.VarLenFeature(tf.string),
 }
 
+
 def get_classes(classes_path):
     """
-    Loads class names from a text file.
+    Load class names from a text file.
 
     Each line in the file is assumed to represent a single class name.
     The function reads all lines, strips whitespace, and returns a list of class names.
@@ -49,24 +49,26 @@ def get_classes(classes_path):
     class_names = [c.strip() for c in class_names]
     return class_names
 
+
 def sparse_to_dense_1d(v, dtype):
     """
     Convert a VarLen sparse tensor to a 1D dense tensor (length N).
 
     Args:
-      v: `tf.SparseTensor`. A rank-1 sparse tensor.
-      dtype: `tf.DType`. The desired dtype of the output.
+        v (tf.SparseTensor): A rank-1 sparse tensor.
+        dtype (tf.DType): The desired dtype of the output.
 
     Returns:
-      Tensor: Dense 1D tensor with shape [N] and dtype `dtype`.
+        tf.Tensor: Dense 1D tensor with shape [N] and dtype `dtype`.
     """
     return tf.cast(tf.sparse.to_dense(v), dtype)
+
 
 # Data augmentations
 
 def maybe_hflip(img, masks, bboxes):
     """
-    Randomly applies a horizontal flip to image, masks, and boxes (p=0.5).
+    Apply a horizontal flip to image, masks, and boxes randomly (p=0.5).
 
     Boxes are mirrored around the image center by updating x: `x' = W - x - w`.
 
@@ -82,6 +84,7 @@ def maybe_hflip(img, masks, bboxes):
             - b_new (tf.Tensor): Updated boxes after flip [N, 4] (float32).
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
+
     def yes():
         # Flip image and masks
         img_f = tf.image.flip_left_right(img)
@@ -93,13 +96,16 @@ def maybe_hflip(img, masks, bboxes):
         x_new = W - x - bw
         b_new = tf.stack([x_new, y, bw, bh], axis=1)
         return img_f, masks_f, b_new
+
     def no():
         return img, masks, bboxes
+
     return tf.cond(do, yes, no)
+
 
 def maybe_brightness(img):
     """
-    Randomly jitters brightness by a multiplicative factor in [-20%, +20%] (p=0.5).
+    Jitter brightness randomly by a multiplicative factor in [-20%, +20%] (p=0.5).
 
     The factor is sampled uniformly from [0.8, 1.2] and values are clipped to [0, 255].
 
@@ -110,67 +116,22 @@ def maybe_brightness(img):
         tf.Tensor: Image of shape [H, W, C] (uint8) with brightness possibly adjusted.
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
+
     def yes():
         factor = 1.0 + (tf.random.uniform([], -0.2, 0.2))
         img_f32 = tf.cast(img, tf.float32) * factor
         img_f32 = tf.clip_by_value(img_f32, 0.0, 255.0)
         return tf.cast(img_f32, tf.uint8)
+
     def no():
         return img
+
     return tf.cond(do, yes, no)
 
-def maybe_scale(img, masks, bboxes):
-    """
-    Randomly scales image, masks, and boxes uniformly (p=0.5).
-
-    The scale factor `s` is sampled from [0.8, 1.2]. Images are resized with bilinear
-    interpolation; masks use nearest neighbor. Boxes are scaled by `s`.
-    Image values are clipped to [0, 255] after bilinear resize and rounding.
-
-    Args:
-        img (tf.Tensor): Input image [H, W, C] (uint8).
-        masks (tf.Tensor): Per-instance masks aligned with `img` [N, H, W] (uint8).
-        bboxes (tf.Tensor): Boxes (x, y, w, h) in `img` coordinates [N, 4] (float32).
-
-    Returns:
-        tuple: A tuple containing:
-            - img_rs (tf.Tensor): Resized image [⌊H*s⌉, ⌊W*s⌉, C] (uint8).
-            - masks_rs (tf.Tensor): Resized masks [N, ⌊H*s⌉, ⌊W*s⌉] (uint8).
-            - b_new (tf.Tensor): Scaled boxes [N, 4] (float32).
-    """
-    do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
-    def yes():
-        s = tf.random.uniform([], 0.8, 1.2)
-
-        # New size
-        orig_hw = tf.cast(tf.shape(img)[:2], tf.float32)  # [H, W]
-        new_hw = tf.cast(tf.round(orig_hw * s), tf.int32)
-        new_h = new_hw[0]
-        new_w = new_hw[1]
-
-        # Resize image (bilinear) and masks (nearest)
-        img_f32 = tf.cast(img, tf.float32)
-        img_rs  = tf.image.resize(img_f32, size=[new_h, new_w], method=tf.image.ResizeMethod.BILINEAR)
-        img_rs  = tf.clip_by_value(img_rs, 0.0, 255.0)
-        img_rs  = tf.cast(tf.round(img_rs), tf.uint8)
-
-        # Resize all masks at once
-        masks_ch = tf.expand_dims(masks, axis=-1)                         # [N,H,W,1]
-        masks_rs = tf.image.resize(masks_ch, [new_h, new_w], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
-        masks_rs = tf.squeeze(masks_rs, axis=-1)                             # [N,H,W]
-        masks_rs = tf.cast(masks_rs, tf.uint8)
-
-        # Scale boxes and areas
-        b_new = bboxes * tf.stack([s, s, s, s])  # (x,y,w,h) * s
-
-        return img_rs, masks_rs, b_new
-    def no():
-        return img, masks, bboxes
-    return tf.cond(do, yes, no)
 
 def maybe_random_crop(img, masks, bboxes, cat_ids):
     """
-    Applies a random crop up to 20% per side, updating masks/boxes/categories (p=0.5).
+    Apply a random crop up to 20% per side, updating masks/boxes/categories (p=0.5).
 
     A rectangular crop is sampled with left/top margins in [0, 0.2*W/H] and
     right/bottom margins in [0, 0.2*W/H]. Boxes are translated to the crop
@@ -192,6 +153,7 @@ def maybe_random_crop(img, masks, bboxes, cat_ids):
             - c_new (tf.Tensor): Category ids for kept instances [N'] (int32).
     """
     do = tf.less(tf.random.uniform([], 0, 1.0), 0.5)
+
     def yes():
         H = tf.shape(img)[0]
         W = tf.shape(img)[1]
@@ -202,16 +164,16 @@ def maybe_random_crop(img, masks, bboxes, cat_ids):
         max_crop_y = tf.cast(tf.floor(Hf * 0.2), tf.int32)
 
         # Sample crop bounds: ensure left <= right and top <= bottom
-        x1 = tf.random.uniform([], minval=0,              maxval=max_crop_x + 1, dtype=tf.int32)
-        y1 = tf.random.uniform([], minval=0,              maxval=max_crop_y + 1, dtype=tf.int32)
-        x2 = tf.random.uniform([], minval=W - max_crop_x, maxval=W + 1,         dtype=tf.int32)
-        y2 = tf.random.uniform([], minval=H - max_crop_y, maxval=H + 1,         dtype=tf.int32)
+        x1 = tf.random.uniform([], minval=0, maxval=max_crop_x + 1, dtype=tf.int32)
+        y1 = tf.random.uniform([], minval=0, maxval=max_crop_y + 1, dtype=tf.int32)
+        x2 = tf.random.uniform([], minval=W - max_crop_x, maxval=W + 1, dtype=tf.int32)
+        y2 = tf.random.uniform([], minval=H - max_crop_y, maxval=H + 1, dtype=tf.int32)
 
         crop_w = x2 - x1
         crop_h = y2 - y1
 
         # Crop image and masks
-        img_cr = tf.slice(img,   [y1, x1, 0], [crop_h, crop_w, -1])
+        img_cr = tf.slice(img, [y1, x1, 0], [crop_h, crop_w, -1])
         masks_cr = tf.slice(masks, [0, y1, x1], [-1, crop_h, crop_w])  # [N, crop_h, crop_w]
 
         # Adjust boxes to crop region, clip, and filter
@@ -230,14 +192,16 @@ def maybe_random_crop(img, masks, bboxes, cat_ids):
 
         # Apply mask to per-instance tensors
         b_new = tf.boolean_mask(tf.stack([nx, ny, nw, nh], axis=1), keep)
-        c_new = tf.boolean_mask(cat_ids,   keep)
-        m_new = tf.boolean_mask(masks_cr,  keep, axis=0)
-
+        c_new = tf.boolean_mask(cat_ids, keep)
+        m_new = tf.boolean_mask(masks_cr, keep, axis=0)
 
         return img_cr, m_new, b_new, c_new
+
     def no():
         return img, masks, bboxes, cat_ids
+
     return tf.cond(do, yes, no)
+
 
 @tf.function
 def parse_example(
@@ -247,10 +211,10 @@ def parse_example(
         scale,
         augment):
     """
-    Parses one TFRecord example and builds multi-scale Mask2Former training targets.
+    Parse one TFRecord example and build multi-scale Mask2Former training targets.
 
     This function parses a single serialized example, decodes the image and per-instance masks,
-    optionally applies augmentations (flip, brightness, random crop), resizes the image and masks,
+    optionally applies augmentations (flip, random crop, brightness), resizes the image and masks,
     scales boxes, and generates per-scale targets.
     It then concatenates category targets (flattened per scale) and mask targets
     (concatenated along channel axis).
@@ -272,7 +236,7 @@ def parse_example(
     ex = tf.io.parse_single_example(serialized, _FEATURES)
 
     # Scalars
-    img_enc = ex["image/encoded"]                  # bytes
+    img_enc = ex["image/encoded"]  # bytes
 
     # Variable-length (per-object) -> dense 1D tensors
     xmin = sparse_to_dense_1d(ex["image/object/bbox/xmin"], tf.float32)
@@ -285,11 +249,14 @@ def parse_example(
     w = (xmax - xmin)
     h = (ymax - ymin)
 
-    cat_ids   = sparse_to_dense_1d(ex["image/object/category_id"], tf.int32)
+    cat_ids = sparse_to_dense_1d(ex["image/object/category_id"], tf.int32)
     mask_pngs = sparse_to_dense_1d(ex["image/object/mask_png"], tf.string)
 
     # Stack boxes as [N, 4] in (x, y, w, h) format
-    bboxes = tf.stack([x, y, w, h], axis=1) if tf.size(xmin) > 0 else tf.zeros([0, 4], tf.float32)
+    if tf.size(xmin) > 0:
+        bboxes = tf.stack([x, y, w, h], axis=1)
+    else:
+        bboxes = tf.zeros([0, 4], tf.float32)
 
     # Decode image to ensure 3 channels
     img = tf.io.decode_image(img_enc, expand_animations=False)  # uint8, shape [H,W,C]
@@ -303,22 +270,19 @@ def parse_example(
         m = tf.io.decode_png(png_bytes, channels=1)  # [H,W,1]
         return tf.squeeze(m, axis=-1)  # [H,W]
 
-    masks = tf.map_fn(_decode_one, mask_pngs, fn_output_signature=tf.uint8) # shape [N, H, W]
+    masks = tf.map_fn(_decode_one, mask_pngs, fn_output_signature=tf.uint8)  # shape [N, H, W]
 
     def _apply_augmentation():
         # Horizontal flip
         img_aug, masks_aug, bboxes_aug = maybe_hflip(img, masks, bboxes)
 
-        # Brightness jitter (+/-20%)
-        img_aug = maybe_brightness(img_aug)
-
-        # Random scaling (0.8x–1.2x)
-        #img_aug, masks_aug, bboxes_aug = maybe_scale(img_aug, masks_aug, bboxes_aug)
-
         # Random crop (≤20% each side); updates and filters instance-aligned tensors
         img_aug, masks_aug, bboxes_aug, cat_ids_aug = maybe_random_crop(
             img_aug, masks_aug, bboxes_aug, cat_ids
         )
+
+        # Brightness jitter (+/-20%) - moved after crop to reducing processing
+        img_aug = maybe_brightness(img_aug)
 
         return img_aug, masks_aug, bboxes_aug, cat_ids_aug
 
@@ -335,19 +299,29 @@ def parse_example(
     # Resize masks to (target_height, target_width) using nearest neighbor
     target_mask_height = tf.cast(tf.round(target_height * scale), tf.int32)
     target_mask_width = tf.cast(tf.round(target_width * scale), tf.int32)
+
+    # [N, H, W] -> [N, H, W, 1]
+    masks_expanded = tf.expand_dims(masks, axis=-1)
+
+    # Use Nearest Neighbor for masks to preserve binary nature logic better than bilinear
     masks_resized = tf.image.resize(
-        tf.expand_dims(tf.cast(masks, tf.float32), axis=-1),  # [N,H,W,1]
+        masks_expanded,
         size=(target_mask_height, target_mask_width),
         method="nearest"
-    )
+    ) # [N, new_h, new_w, 1]
 
-    masks_resized = masks_resized / 255.0
+    masks_resized = tf.squeeze(masks_resized, axis=-1) # [N, new_h, new_w]
+    masks_resized = tf.cast(masks_resized, tf.uint8)
 
-    masks_resized = tf.cast(tf.round(tf.squeeze(masks_resized, axis=-1)), tf.uint8)  # [N,new_h,new_w]
+    # Convert to binary 0/1 (original masks are usually 0 or 255 or 0/1)
+    # Ensuring it's 0/1
+    masks_resized = tf.cast(masks_resized > 127, tf.uint8)
+
     masks_resized = tf.transpose(masks_resized, perm=[1, 2, 0])  # [new_h,new_w,N] for later use
     cat_ids = cat_ids - 1  # convert to 0-based category ids
 
     return image_resized, cat_ids, masks_resized
+
 
 def create_coco_tfrecord_dataset(
     train_tfrecord_directory: str,
@@ -360,7 +334,7 @@ def create_coco_tfrecord_dataset(
     number_images: Optional[int] = None
 ) -> tf.data.Dataset:
     """
-    Creates a `tf.data.Dataset` from COCO TFRecord shards and emits Mask2Former targets.
+    Create a `tf.data.Dataset` from COCO TFRecord shards and emit Mask2Former targets.
 
     This utility scans a directory for `*.tfrecord` shards, builds a streaming `TFRecordDataset`,
     optionally shuffles and/or limits the number of examples, parses each example,
@@ -384,8 +358,8 @@ def create_coco_tfrecord_dataset(
     Returns:
         tf.data.Dataset: A dataset of batched tuples:
             - image_resized (tf.Tensor): [B, Ht, Wt, 3] (float32) in [0, 1].
-            - cate_targets (tf.Tensor): [B, sum(S_i^2)] (int32).
-            - mask_targets (tf.Tensor): [B, Hf, Wf, sum(S_i^2)] (uint8).
+            - cate_targets (tf.Tensor): [B, N] (int32).
+            - mask_targets (tf.Tensor): [B, Hf, Wf, N] (uint8).
     """
     target_height, target_width = target_size
     augment_tf = tf.constant(augment)
@@ -407,8 +381,12 @@ def create_coco_tfrecord_dataset(
         ds = ds.take(number_images)
 
     # Parse
-    ds = ds.map(lambda x: parse_example(x, target_height=target_height, target_width=target_width, scale=scale, augment=augment_tf),
-                num_parallel_calls=tf.data.AUTOTUNE, deterministic=deterministic)
+    ds = ds.map(
+        lambda x: parse_example(
+            x, target_height=target_height, target_width=target_width, scale=scale, augment=augment_tf
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE, deterministic=deterministic
+    )
 
     ds = ds.padded_batch(
         batch_size=batch_size,
@@ -416,7 +394,7 @@ def create_coco_tfrecord_dataset(
             [target_size[0], target_size[1], 3],  # image shape
             [None, ],  # cate_target shape (num_instances,)
             [int(round(target_size[0] * scale)), int(round(target_size[1] * scale)), None]
-        # mask_target shape (feat_h, feat_w, num_instances)
+            # mask_target shape (feat_h, feat_w, num_instances)
         ),
         padding_values=(
             tf.constant(0.0, dtype=tf.float32),

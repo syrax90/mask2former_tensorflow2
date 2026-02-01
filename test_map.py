@@ -16,10 +16,7 @@ from model_functions import Mask2FormerModel
 def get_dataset_to_model_map_from_json(json_path, num_classes, classes_path):
     """
     Creates a mapping tensor from Dataset IDs to Model IDs.
-    
-    Since the user has confirmed that the dataset indices are already 0-based and 
-    aligned with `model_class_names`, this function simply returns an identity map.
-    
+
     Args:
         json_path (str): Unused. Kept for compatibility.
         num_classes (int): Number of classes.
@@ -156,7 +153,7 @@ def process_single_image_predictions(
 
     # Check if we have any GT masks to resize
     n_gt_active = tf.shape(gt_masks_grid)[-1]
-    
+
     def resize_gt_masks():
         gt_masks_grid_exp = tf.expand_dims(gt_masks_grid, 0) # [1, Hf, Wf, N_gt]
         up = tf.image.resize(gt_masks_grid_exp, (target_height, target_width), method='nearest')
@@ -167,7 +164,7 @@ def process_single_image_predictions(
 
     # If N_gt > 0, resize. Else return empty.
     gt_masks_up = tf.cond(n_gt_active > 0, resize_gt_masks, empty_gt_masks)
-    
+
     gt_masks_up = tf.transpose(gt_masks_up, perm=[2, 0, 1]) # [N_gt, H, W]
 
     gt_masks_bin = tf.cast(tf.cast(gt_masks_up, tf.float32) > 0.5, tf.float32)
@@ -185,13 +182,13 @@ def process_single_image_predictions(
 
 
 @tf.function
-def compute_matches_tf(iou_matrix, iou_thresh):
+def compute_matches_single_tf(iou_matrix, iou_thresh):
     """
-    Greedy matching of predictions to ground truth using TensorFlow.
+    Greedy matching of predictions to ground truth for a single threshold.
 
     Args:
         iou_matrix (tf.Tensor): [N_dt, N_gt] float32. Rows are predictions (sorted), cols are GT.
-        iou_thresh (float): IoU threshold.
+        iou_thresh (tf.Tensor): Scalar float IoU threshold.
 
     Returns:
         tf.Tensor: dt_matched [N_dt] bool.
@@ -207,7 +204,7 @@ def compute_matches_tf(iou_matrix, iou_thresh):
 
     def body(i, gt_cov, dt_mat):
         # i: current dt index (already sorted by score)
-        row = iou_matrix[i] # [N_gt]
+        row = iou_matrix[i]  # [N_gt]
 
         # Mask out covered GTs and check threshold
         # valid: iou >= thresh AND not covered
@@ -239,35 +236,82 @@ def compute_matches_tf(iou_matrix, iou_thresh):
         lambda i, g, d: i < n_dt,
         body,
         [0, gt_covered, dt_matched],
-        parallel_iterations=1 # Serial execution required for greedy matching
+        parallel_iterations=1,  # Serial execution required for greedy matching
     )
 
     return dt_matched_final
 
+
+@tf.function
+def match_predictions_tf(iou_matrix, iou_thresholds):
+    """
+    Greedy matching of predictions to ground truth for multiple thresholds.
+
+    Args:
+        iou_matrix (tf.Tensor): [N_dt, N_gt] float32. Rows are predictions (sorted), cols are GT.
+        iou_thresholds (tf.Tensor): [N_thresh] float32. IoU thresholds.
+
+    Returns:
+        tf.Tensor: dt_matched [N_thresh, N_dt] bool.
+    """
+    # Use map_fn to process all thresholds in the graph
+    # Results in [N_thresh, N_dt]
+    return tf.map_fn(
+        lambda thresh: compute_matches_single_tf(iou_matrix, thresh),
+        iou_thresholds,
+        fn_output_signature=tf.bool,
+    )
+
+
 class MAPEvaluator:
     """
     TensorFlow-optimized mAP Evaluator.
+
     Accumulates results in lists of Tensors, computes mAP using TF ops.
+
+    Args:
+        num_classes (int): Number of classes.
+        iou_thresholds (list or tf.Tensor, optional): IoU thresholds.
+            Defaults to 0.5:0.05:0.95.
     """
+
     def __init__(self, num_classes, iou_thresholds=None):
         self.num_classes = num_classes
-        self.iou_thresholds = iou_thresholds if iou_thresholds is not None else tf.linspace(0.5, 0.95, 10)
-        # Convert thresholds to tensor explicitly if not already
-        if not tf.is_tensor(self.iou_thresholds): # pragma: no cover
-             self.iou_thresholds = tf.convert_to_tensor(self.iou_thresholds, dtype=tf.float32)
+        if iou_thresholds is not None:
+             self.iou_thresholds = iou_thresholds
+        else:
+             self.iou_thresholds = tf.linspace(0.5, 0.95, 10)
 
-        # Storage: { cls_id: { 'scores': [list_of_tensors], 'tp': {thresh: [list_of_tensors]}, 'n_gt': int } }
+        # Convert thresholds to tensor explicitly if not already
+        if not tf.is_tensor(self.iou_thresholds):
+            self.iou_thresholds = tf.convert_to_tensor(
+                self.iou_thresholds, dtype=tf.float32
+            )
+
+        # Storage:
+        # { cls_id: {
+        #      'scores': [list_of_tensors],
+        #      'matches': [list_of_tensors (N_thresh, N_dt)],
+        #      'n_gt': int
+        #   }
+        # }
         self.stats = {}
         for c in range(num_classes):
             self.stats[c] = {
-                'scores': [],
-                'tp': {t_idx: [] for t_idx in range(len(self.iou_thresholds))},
-                'n_gt': 0
+                "scores": [],
+                "matches": [],  # Changed from 'tp' dict to single list of N_thresh x N_dt matrices
+                "n_gt": 0,
             }
 
     def update(self, pred_scores, pred_labels, iou_matrix, gt_labels):
         """
-        Update stats. Inputs are Tensors.
+        Update stats with results from a single image.
+
+        Args:
+            pred_scores (tf.Tensor): [N_dt] Predicted scores.
+            pred_labels (tf.Tensor): [N_dt] Predicted labels.
+            iou_matrix (tf.Tensor): [N_dt, N_gt] IoU matrix.
+            gt_labels (tf.Tensor): [N_gt] Ground truth labels.
         """
         # Logic partially in Python to manage the Class dictionary structure,
         # but heavy lifting in TF.
@@ -276,7 +320,7 @@ class MAPEvaluator:
         # Using TF for uniqueness
         all_labels = tf.concat([tf.cast(pred_labels, tf.int32), gt_labels], axis=0)
         unique_classes, _ = tf.unique(all_labels)
-        unique_classes = unique_classes.numpy() # iterate in python
+        unique_classes = unique_classes.numpy()  # iterate in python
 
         for cls_id in unique_classes:
             cls_id = int(cls_id)
@@ -287,44 +331,55 @@ class MAPEvaluator:
             gt_indices = tf.where(tf.equal(gt_labels, cls_id))[:, 0]
             dt_indices = tf.where(tf.equal(pred_labels, cls_id))[:, 0]
 
-            n_gt = tf.shape(gt_indices)[0].numpy()
-            self.stats[cls_id]['n_gt'] += n_gt
+            n_gt_cls = tf.shape(gt_indices)[0].numpy()
+            self.stats[cls_id]["n_gt"] += n_gt_cls
 
             if tf.shape(dt_indices)[0] == 0:
                 continue
 
             # Gather data for this class
             # IoU matrix sub-block: [N_dt_cls, N_gt_cls]
-            cls_iou_mat = tf.gather(iou_matrix, dt_indices) # rows
-            if n_gt > 0:
-                cls_iou_mat = tf.gather(cls_iou_mat, gt_indices, axis=1) # cols
+            cls_iou_mat = tf.gather(iou_matrix, dt_indices)  # rows
+            if n_gt_cls > 0:
+                cls_iou_mat = tf.gather(cls_iou_mat, gt_indices, axis=1)  # cols
             else:
                 cls_iou_mat = tf.zeros((tf.shape(dt_indices)[0], 0), dtype=tf.float32)
 
             cls_scores = tf.gather(pred_scores, dt_indices)
 
             # Sort by score desc
-            sort_idx = tf.argsort(cls_scores, direction='DESCENDING')
+            sort_idx = tf.argsort(cls_scores, direction="DESCENDING")
             cls_scores_sorted = tf.gather(cls_scores, sort_idx)
             cls_iou_mat_sorted = tf.gather(cls_iou_mat, sort_idx)
 
             # Store scores
-            self.stats[cls_id]['scores'].append(cls_scores_sorted)
+            self.stats[cls_id]["scores"].append(cls_scores_sorted)
 
-            # Check matches for each threshold
-            for t_idx, t_val in enumerate(self.iou_thresholds):
-                if n_gt == 0:
-                    matches = tf.zeros(tf.shape(dt_indices)[0], dtype=tf.bool)
-                else:
-                    matches = compute_matches_tf(cls_iou_mat_sorted, t_val)
+            # Compute matches for all thresholds at once
+            if n_gt_cls == 0:
+                # [N_thresh, N_dt] false
+                num_thresh = tf.shape(self.iou_thresholds)[0]
+                num_dt = tf.shape(dt_indices)[0]
+                matches = tf.zeros((num_thresh, num_dt), dtype=tf.bool)
+            else:
+                matches = match_predictions_tf(
+                    cls_iou_mat_sorted, self.iou_thresholds
+                )
 
-                self.stats[cls_id]['tp'][t_idx].append(matches)
+            self.stats[cls_id]["matches"].append(matches)
 
     @tf.function(reduce_retracing=True)
     def _compute_ap_per_class(self, tp_cat, n_gt):
-        # tp_cat: [N_total_dt] bool (True if matched)
-        # n_gt: int scalar (tensor)
+        """
+        Compute Average Precision for a single class and method.
 
+        Args:
+            tp_cat (tf.Tensor): [N_total_dt] bool. True if matched.
+            n_gt (tf.Tensor): Scalar int. Total ground truth count.
+
+        Returns:
+            tf.Tensor: AP scalar.
+        """
         n_gt = tf.cast(n_gt, tf.float32)
         if n_gt == 0:
             return 0.0
@@ -345,22 +400,11 @@ class MAPEvaluator:
         # Scan reverse with max
         precisions = tf.scan(lambda a, x: tf.maximum(a, x), precisions, reverse=True)
 
-        # Add 0, 1 endpoints for interpolation?
-        # COCO 101-point method evaluates at r=0.00, 0.01, ... 1.00
-        # Definition: AP = mean(Precision(r)) for r in 0:0.01:1
-        # Precision(r) = max(precision(r') for r' >= r)
-
+        # COCO 101-point method
         recall_steps = tf.linspace(0.0, 1.0, 101)
 
         # Find indices where recalls >= step
-        # recalls is monotonic increasing (mostly)? Yes, tp_sum increases.
-        # But we need to handle the case efficiently.
-        # tf.searchsorted requires sorted input.
-
-        # We can prepend 0 to recalls and precisions to ensure start range?
-        # Actually standard searchsorted on recalls is fine.
-
-        indices = tf.searchsorted(recalls, recall_steps, side='left')
+        indices = tf.searchsorted(recalls, recall_steps, side="left")
 
         # Gather precisions at these indices
         N = tf.shape(precisions)[0]
@@ -369,46 +413,63 @@ class MAPEvaluator:
         gathered_precisions = tf.gather(precisions, indices_clipped)
 
         # If the found index is N (meaning step > max_recall), the precision is 0.
-        # Unless max_recall == 1.0 ?
-        # Generally if we haven't reached that recall, precision is 0.
         mask = indices < N
         gathered_precisions = tf.where(mask, gathered_precisions, 0.0)
 
         return tf.reduce_mean(gathered_precisions)
 
     def calculate_map(self):
+        """
+        Compute mAP across all classes.
+
+        Returns:
+            float: mAP score.
+        """
         aps = []
         print("Computing mAP...")
         for cls_id in self.stats:
-            n_gt = self.stats[cls_id]['n_gt']
+            n_gt = self.stats[cls_id]["n_gt"]
             if n_gt == 0:
                 continue
 
             # Global sort for this class
-            scores_list = self.stats[cls_id]['scores']
+            scores_list = self.stats[cls_id]["scores"]
             if not scores_list:
                 aps.append(0.0)
                 continue
 
-            all_scores = tf.concat(scores_list, axis=0) # [Total_DT]
+            all_scores = tf.concat(scores_list, axis=0)  # [Total_DT]
 
             # Sort globally
-            global_sort_idx = tf.argsort(all_scores, direction='DESCENDING')
+            global_sort_idx = tf.argsort(all_scores, direction="DESCENDING")
+
+            # Collect matches: List of [N_thresh, N_dt_batch] -> Concat -> [N_thresh, Total_DT]
+            matches_list = self.stats[cls_id]["matches"]
+            # Concat along axis 1 (time/detection axis)
+            all_matches_matrix = tf.concat(matches_list, axis=1) # [N_thresh, Total_DT]
 
             # Compute AP per threshold
-            ap_thresholds = []
-            for t_idx in self.stats[cls_id]['tp']:
-                tp_list = self.stats[cls_id]['tp'][t_idx]
-                all_matches = tf.concat(tp_list, axis=0) # [Total_DT]
+            # We can iterate over thresholds in Python (only 10 usually)
+            # but vectorized gathering is better.
 
-                # Reorder using global sort
-                all_matches_sorted = tf.gather(all_matches, global_sort_idx)
+            # Reorder matches according to global sort
+            # global_sort_idx is [Total_DT]
+            # We want to shuffle the columns of all_matches_matrix
+            all_matches_sorted = tf.gather(all_matches_matrix, global_sort_idx, axis=1)
 
-                ap = self._compute_ap_per_class(all_matches_sorted, tf.constant(n_gt))
-                ap_thresholds.append(ap)
+            # Calculate AP for each threshold row
+            num_thresh = tf.shape(self.iou_thresholds)[0]
+            ap_thresholds = tf.TensorArray(tf.float32, size=num_thresh)
 
-            # Mean for this class over thresholds
-            cls_mAP = tf.reduce_mean(tf.stack(ap_thresholds))
+            for t in range(num_thresh):
+                row = all_matches_sorted[t]
+                ap = self._compute_ap_per_class(row, tf.constant(n_gt))
+                ap_thresholds = ap_thresholds.write(t, ap)
+
+            ap_thresholds_stacked = ap_thresholds.stack()
+
+            # Mean for this class over simple average of thresholds
+            cls_mAP = tf.reduce_mean(ap_thresholds_stacked)
             aps.append(cls_mAP)
 
         if not aps:
@@ -419,6 +480,11 @@ class MAPEvaluator:
 
 
 def main():
+    """
+    Main function to run mAP evaluation.
+
+    Loads the validation dataset and model, runs inference, and computes mAP.
+    """
     # 1. Config
     cfg = Mask2FormerConfig()
 
@@ -490,6 +556,9 @@ def main():
     # Inference
     @tf.function
     def predict_step(img):
+        """
+        Runs one inference step.
+        """
         return model(img, training=False)
 
     print("Starting evaluation...")
@@ -523,8 +592,8 @@ def main():
     print(f"Evaluation finished in {total_time:.2f}s")
 
     # 5. Compute mAP
-    mAP = evaluator.calculate_map()
-    print(f"mAP: {mAP:.4f}")
+    mean_ap = evaluator.calculate_map()
+    print(f"mAP: {mean_ap:.4f}")
 
 if __name__ == '__main__':
     main()

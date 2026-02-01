@@ -9,8 +9,7 @@ from multi_scale_deformable_attention import MSDeformAttn
 
 class SinePositionEmbedding(tf.keras.layers.Layer):
     """
-    Standard DETR 2D sine/cosine positional encoding, matching Mask2Former:
-    normalize=True, scale=2*pi.
+    Standard DETR 2D sine/cosine positional encodingr.
 
     Attributes:
         num_pos_feats (int): Number of positional features.
@@ -18,7 +17,13 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
         scale (float): Scale factor for normalization.
     """
 
-    def __init__(self, num_pos_feats=128, temperature=10000, scale=None, **kwargs):
+    def __init__(
+        self,
+        num_pos_feats: int = 128,
+        temperature: float = 10000.0,
+        scale: float | None = None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.num_pos_feats = num_pos_feats
         self.temperature = float(temperature)
@@ -26,19 +31,19 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
             scale = 2.0 * tf.experimental.numpy.pi
         self.scale = float(scale)
 
-    def call(self, x, mask=None):
+    def call(self, x: tf.Tensor, mask: tf.Tensor | None = None) -> tf.Tensor:
         """
         Generates 2D sine/cosine positional embeddings for input features.
 
         Args:
             x (tf.Tensor): Input feature map of shape [B, H, W, C].
-            mask (tf.Tensor, optional): Boolean mask of shape [B, H, W] where True indicates padding. Defaults to None.
+            mask (tf.Tensor, optional): Boolean mask of shape [B, H, W] where True indicates padding.
+                Defaults to None.
 
         Returns:
             tf.Tensor: Positional embeddings of shape [B, H, W, 2*num_pos_feats].
         """
         # x: [B, H, W, C]
-        x = tf.convert_to_tensor(x)
         B = tf.shape(x)[0]
         H = tf.shape(x)[1]
         W = tf.shape(x)[2]
@@ -101,12 +106,12 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
 
     def __init__(
         self,
-        d_model=256,
-        n_levels=4,
-        n_heads=8,
-        n_points=4,
-        dim_feedforward=1024,
-        dropout=0.1,
+        d_model: int = 256,
+        n_levels: int = 4,
+        n_heads: int = 8,
+        n_points: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -138,7 +143,7 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
         self.activation = tf.nn.relu
 
     @staticmethod
-    def with_pos_embed(tensor, pos):
+    def with_pos_embed(tensor: tf.Tensor, pos: tf.Tensor | None) -> tf.Tensor:
         """
         Adds positional embeddings to tensor if provided.
 
@@ -153,14 +158,14 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
 
     def call(
         self,
-        src,                    # [B, S, C]
-        pos,                    # [B, S, C] positional embedding
-        reference_points,       # [B, S, L, 2]
-        spatial_shapes,         # [L, 2]
-        level_start_index,      # [L]
-        padding_mask=None,      # [B, S] or None
-        training=False,
-    ):
+        src: tf.Tensor,
+        pos: tf.Tensor,
+        reference_points: tf.Tensor,
+        spatial_shapes: tf.Tensor,
+        level_start_index: tf.Tensor,
+        padding_mask: tf.Tensor | None = None,
+        training: bool = False,
+    ) -> tf.Tensor:
         """
         Applies multi-scale deformable attention and feed-forward network.
 
@@ -176,7 +181,6 @@ class DeformableTransformerEncoderLayer(tf.keras.layers.Layer):
         Returns:
             tf.Tensor: Transformed features of shape [B, S, C].
         """
-
         # MSDeformAttn self-attention (multi-scale)
         src2 = self.self_attn(
             query=self.with_pos_embed(src, pos),
@@ -219,13 +223,13 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
 
     def __init__(
         self,
-        num_layers=6,
-        d_model=256,
-        n_levels=4,
-        n_heads=8,
-        n_points=4,
-        dim_feedforward=1024,
-        dropout=0.1,
+        num_layers: int = 6,
+        d_model: int = 256,
+        n_levels: int = 4,
+        n_heads: int = 8,
+        n_points: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -246,7 +250,9 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
         ]
 
     @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios):
+    def get_reference_points(
+        spatial_shapes: tf.Tensor, valid_ratios: tf.Tensor
+    ) -> tf.Tensor:
         """
         Generates reference points for multi-scale deformable attention.
 
@@ -262,12 +268,13 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
         spatial_shapes = tf.cast(spatial_shapes, tf.int32)
         valid_ratios = tf.cast(valid_ratios, tf.float32)
 
-        B = tf.shape(valid_ratios)[0]
         L = tf.shape(spatial_shapes)[0]
 
         # We'll concatenate across levels along the "S" dimension.
         # Trick: write tensors as [HW, B, 2] into TensorArray and use ta.concat()
-        ta = tf.TensorArray(tf.float32, size=L, infer_shape=False, element_shape=[None, None, 2])
+        ta = tf.TensorArray(
+            tf.float32, size=L, infer_shape=False, element_shape=[None, None, 2]
+        )
 
         def cond(lvl, ta_):
             return lvl < L
@@ -298,7 +305,12 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
             ta_ = ta_.write(lvl, ref)
             return lvl + 1, ta_
 
-        _, ta = tf.while_loop(cond, body, loop_vars=[tf.constant(0, tf.int32), ta], parallel_iterations=1)
+        _, ta = tf.while_loop(
+            cond,
+            body,
+            loop_vars=[tf.constant(0, tf.int32), ta],
+            parallel_iterations=1,
+        )
 
         # Reconstruct reference points: [B, S, L, 2]
         reference_points = tf.transpose(ta.concat(), [1, 0, 2])
@@ -309,14 +321,14 @@ class DeformableTransformerEncoder(tf.keras.layers.Layer):
 
     def call(
         self,
-        src,               # [B, S, C]
-        spatial_shapes,    # [L, 2]
-        level_start_index, # [L]
-        valid_ratios,      # [B, L, 2]
-        pos=None,          # [B, S, C]
-        padding_mask=None, # [B, S] or None
-        training=False,
-    ):
+        src: tf.Tensor,
+        spatial_shapes: tf.Tensor,
+        level_start_index: tf.Tensor,
+        valid_ratios: tf.Tensor,
+        pos: tf.Tensor | None = None,
+        padding_mask: tf.Tensor | None = None,
+        training: bool = False,
+    ) -> tf.Tensor:
         """
         Applies multi-scale deformable transformer encoding.
 
@@ -370,14 +382,14 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
 
     def __init__(
         self,
-        d_model=256,
-        num_feature_levels=4,
-        transformer_num_feature_levels=3,
-        num_encoder_layers=6,
-        n_heads=8,
-        n_points=4,
-        dim_feedforward=1024,
-        dropout=0.1,
+        d_model: int = 256,
+        num_feature_levels: int = 4,
+        transformer_num_feature_levels: int = 3,
+        num_encoder_layers: int = 6,
+        n_heads: int = 8,
+        n_points: int = 4,
+        dim_feedforward: int = 1024,
+        dropout: float = 0.1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -430,12 +442,13 @@ class MSDeformablePixelDecoder(tf.keras.layers.Layer):
 
         self.pos_embedding = SinePositionEmbedding(num_pos_feats=d_model // 2)
 
-    def call(self, features, training=False):
+    def call(self, features: list[tf.Tensor], training: bool = False) -> tuple:
         """
         Processes multi-scale features through pixel decoder.
 
         Args:
-            features (list): List of feature tensors [x2, x3, x4, x5], each of shape [B, H_l, W_l, C_in].
+            features (list[tf.Tensor]): List of feature tensors [x2, x3, x4, x5],
+                each of shape [B, H_l, W_l, C_in].
             training (bool): Whether in training mode. Defaults to False.
 
         Returns:
