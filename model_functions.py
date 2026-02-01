@@ -20,16 +20,15 @@ from transformer_decoder import TransformerDecoder
 
 # FPN-ResNet50 backbone
 
-def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
+def get_resnet50_backbone(input_shape=(480, 480, 3)):
     """
-    Builds a Feature Pyramid Network (FPN) on top of a ResNet50 backbone.
+    Builds a ResNet50 backbone and returns feature maps C2, C3, C4, C5.
 
     Args:
         input_shape (tuple): Input image shape as (height, width, channels). Defaults to (480, 480, 3).
-        ouput_kernels_number (int): Number of output channels for each FPN level. Defaults to 256.
 
     Returns:
-        tf.keras.Model: Model with inputs=image tensor and outputs=[p2, p3, p4, p5] feature maps.
+        tf.keras.Model: Model with inputs=image tensor and outputs=[c2, c3, c4, c5] feature maps.
     """
     backbone = ResNet50(
         weights="imagenet", include_top=False, input_shape=input_shape
@@ -42,42 +41,7 @@ def build_fpn_resnet50(input_shape=(480, 480, 3), ouput_kernels_number=256):
     c4_output = backbone.get_layer("conv4_block6_out").output  # stride 16
     c5_output = backbone.get_layer("conv5_block3_out").output  # stride 32
 
-    # Lateral connections
-    p5 = Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c5")(c5_output)
-    p4 = Add(name="fpn_p4_add")(
-        [
-            UpSampling2D(name="fpn_p5_upsample")(p5),
-            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c4")(c4_output),
-        ]
-    )
-    p3 = Add(name="fpn_p3_add")(
-        [
-            UpSampling2D(name="fpn_p4_upsample")(p4),
-            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c3")(c3_output),
-        ]
-    )
-    p2 = Add(name="fpn_p2_add")(
-        [
-            UpSampling2D(name="fpn_p3_upsample")(p3),
-            Conv2D(256, (1, 1), padding="same", name="fpn_lateral_c2")(c2_output),
-        ]
-    )
-
-    # Smoothing convolutions
-    p5 = Conv2D(
-        ouput_kernels_number, (3, 3), padding="same", name="fpn_p5_smooth"
-    )(p5)
-    p4 = Conv2D(
-        ouput_kernels_number, (3, 3), padding="same", name="fpn_p4_smooth"
-    )(p4)
-    p3 = Conv2D(
-        ouput_kernels_number, (3, 3), padding="same", name="fpn_p3_smooth"
-    )(p3)
-    p2 = Conv2D(
-        ouput_kernels_number, (3, 3), padding="same", name="fpn_p2_smooth"
-    )(p2)
-
-    return Model(inputs=backbone.input, outputs=[p2, p3, p4, p5], name="fpn_resnet50")
+    return Model(inputs=backbone.input, outputs=[c2_output, c3_output, c4_output, c5_output], name="resnet50_backbone")
 
 
 # Mask2Former Head
@@ -119,7 +83,7 @@ class Mask2FormerHead(Layer):
         self.query_embed = self.add_weight(
             name="query_embed",
             shape=(num_queries, d_model * 2),
-            initializer=tf.keras.initializers.RandomNormal(stddev=0.02),
+            initializer=tf.keras.initializers.RandomNormal(stddev=1.0),
             trainable=True,
         )
         # Transformer decoder (with mask attention)
@@ -219,8 +183,9 @@ class Mask2FormerModel(tf.keras.Model):
     TensorFlow implementation of a Mask2Former-style model.
 
     Architecture:
-        image -> FPN-ResNet50 -> mask feature map (stride 4)
-              -> transformer-based Mask2Former head
+        image -> ResNet50 (C2, C3, C4, C5)
+              -> PixelDecoder (MSDeformablePixelDecoder)
+              -> TransformerDecoder (Mask2FormerHead)
               -> class logits + mask logits
 
     This is a *model-only* implementation: no loss functions or matching.
@@ -257,17 +222,16 @@ class Mask2FormerModel(tf.keras.Model):
         self.num_queries = num_queries
         self.transformer_input_channels = transformer_input_channels
 
-        # FPN-ResNet backbone
-        self.backbone = build_fpn_resnet50(
-            input_shape=input_shape,
-            ouput_kernels_number=transformer_input_channels,
+        # ResNet backbone
+        self.backbone = get_resnet50_backbone(
+            input_shape=input_shape
         )
 
         # Pixel decoder
         self.pixel_decoder = MSDeformablePixelDecoder(
             d_model=transformer_input_channels,
-            num_feature_levels=4,  # p2, p3, p4, p5
-            transformer_num_feature_levels=3,  # deformable encoder uses p3, p4, p5
+            num_feature_levels=4,  # C2, C3, C4, C5
+            transformer_num_feature_levels=3,  # deformable encoder uses C3, C4, C5
             num_encoder_layers=6,  # or any value you prefer
             n_heads=num_heads,
             n_points=4,  # typical value in Mask2Former
@@ -302,10 +266,10 @@ class Mask2FormerModel(tf.keras.Model):
                 - pred_masks (tf.Tensor): Mask predictions [B, num_queries, Hm, Wm].
                 - aux_outputs (list): Auxiliary outputs for deep supervision.
         """
-        p2, p3, p4, p5 = self.backbone(inputs, training=training)
+        c2, c3, c4, c5 = self.backbone(inputs, training=training)
 
         memory_list, memory_pos_list, decoder_shapes, mask_features = self.pixel_decoder(
-            [p2, p3, p4, p5],
+            [c2, c3, c4, c5],
             training=training,
         )
 
@@ -318,3 +282,4 @@ class Mask2FormerModel(tf.keras.Model):
         )
 
         return pred_logits, pred_masks, aux_outputs
+
