@@ -54,137 +54,44 @@ def preprocess_image(image_path, input_size=(320, 320)):
     img_resized = cv2.resize(img, input_size)
     # Replaced 0-1 scaling with ResNet50 preprocessing to match training data
     img_resized = img_resized.astype(np.float32)
+    # Note: preprocess_input assumes RGB and might zero-center the data (not necessarily [0,1]).
     img_resized = tf.keras.applications.resnet50.preprocess_input(img_resized)
 
     return img_resized, original_shape, img
 
 @tf.function
-def matrix_nms(masks, scores, labels, pre_nms_k=500, post_nms_k=100, score_threshold=0.5, sigma=0.5):
-    """
-    Perform Matrix NMS for class-aware suppression of instance masks.
-
-    This implementation follows the Matrix NMS formulation where each candidate’s
-    score is decayed by the maximum IoU it has with higher-scoring, same-class
-    candidates. Masks are first binarized at 0.5.
-
-    Args:
-        masks (tf.Tensor): Predicted masks of shape `(N, H, W)`, values in `[0, 1]`.
-        scores (tf.Tensor): Confidence scores of shape `(N,)`.
-        labels (tf.Tensor): Class indices of shape `(N,)`, dtype integer.
-        pre_nms_k (int, optional): If provided, keep only the top-`k` by `scores`
-            before NMS to reduce computation. Defaults to `500`.
-        post_nms_k (int, optional): If provided, keep only the top-`k` by decayed
-            scores after NMS. If `None`, keep all above the threshold. Defaults to `100`.
-        score_threshold (float, optional): Minimum decayed score to keep a mask. Defaults to `0.5`.
-        sigma (float, optional): Gaussian decay parameter used in Matrix NMS. Defaults to `0.5`.
-
-    Returns:
-        tf.Tensor: Indices (into the original `masks/scores/labels` tensors) of the
-        kept detections after Matrix NMS, shape `(M,)`, dtype `int32`.
-
-    Notes:
-        * IoU is computed on binarized masks (`>= 0.5`).
-        * Suppression is class-aware; cross-class pairs do not contribute to decay.
-    """
-    # Binarize masks at 0.5 threshold
-    seg_masks = tf.cast(masks >= 0.5, dtype=tf.float32)  # shape: (N, H, W)
-    mask_sum = tf.reduce_sum(seg_masks, axis=[1, 2])  # shape: (N,)
-
-    # If desired, select top pre_nms_k by score to limit computation
-    num_masks = tf.shape(scores)[0]
-    if pre_nms_k is not None:
-        num_selected = tf.minimum(pre_nms_k, num_masks)
-    else:
-        num_selected = num_masks
-    topk_indices = tf.argsort(scores, direction='DESCENDING')[:num_selected]
-    seg_masks = tf.gather(seg_masks, topk_indices)  # select masks by top scores
-    labels_sel = tf.gather(labels, topk_indices)
-    scores_sel = tf.gather(scores, topk_indices)
-    mask_sum_sel = tf.gather(mask_sum, topk_indices)
-
-    # Flatten masks for matrix operations
-    N = tf.shape(seg_masks)[0]
-    seg_masks_flat = tf.reshape(seg_masks, (N, -1))  # shape: (N, H*W)
-
-    # Compute intersection and IoU matrix (N x N)
-    intersection = tf.matmul(seg_masks_flat, seg_masks_flat, transpose_b=True)  # pairwise intersect counts
-    # Expand mask areas to full matrices
-    mask_sum_matrix = tf.tile(mask_sum_sel[tf.newaxis, :], [N, 1])  # shape: (N, N)
-    union = mask_sum_matrix + tf.transpose(mask_sum_matrix) - intersection
-    iou = intersection / (union + 1e-6)  # IoU matrix (avoid div-by-zero)
-    # Zero out diagonal and lower triangle (keep i<j pairs)
-    iou = tf.linalg.band_part(iou, 0, -1) - tf.linalg.band_part(iou, 0, 0)  # upper triangular without diagonal
-
-    # Class-aware IoU: zero out IoU for pairs with different labels
-    labels_matrix = tf.tile(labels_sel[tf.newaxis, :], [N, 1])  # each row is labels vector
-    same_class = tf.cast(tf.equal(labels_matrix, tf.transpose(labels_matrix)), tf.float32)
-    same_class = tf.linalg.band_part(same_class, 0, -1) - tf.linalg.band_part(same_class, 0, 0)
-    decay_iou = iou * same_class  # IoU only for same-class pairs (upper tri)
-
-    # Compute max IoU for each mask with any higher-scoring mask
-    # (Since i<j is upper tri, for column j, relevant i are those with i < j)
-    max_iou_per_col = tf.reduce_max(decay_iou, axis=0)
-    comp_matrix = tf.tile(max_iou_per_col[..., tf.newaxis], [1, N])
-
-    decay_matrix = tf.exp(-((decay_iou ** 2 - comp_matrix ** 2) / sigma))
-
-    # Aggregate decay: for each column j, get the minimum decay factor across all i<j
-    decay_coeff = tf.reduce_min(decay_matrix, axis=0)  # shape: (N,)
-    decay_coeff = tf.where(tf.math.is_inf(decay_coeff), 1.0, decay_coeff)
-    # (If no i<j, reduce_min gives +inf; replace inf with 1.0 meaning no suppression)
-
-    # Decay the scores and filter by threshold
-    new_scores = scores_sel * decay_coeff
-    keep_mask = new_scores >= score_threshold                        # boolean mask of those above threshold
-    new_scores = tf.where(keep_mask, new_scores, tf.zeros_like(new_scores))
-
-    # Select top post_nms_k by the decayed scores
-    if post_nms_k is not None:
-        num_final = tf.minimum(post_nms_k, tf.shape(new_scores)[0])
-    else:
-        num_final = tf.shape(new_scores)[0]
-    final_indices = tf.argsort(new_scores, direction='DESCENDING')[:num_final]
-    final_indices = tf.boolean_mask(final_indices, tf.greater(tf.gather(new_scores, final_indices), 0))
-
-    # Map back to original indices
-    kept_indices = tf.gather(topk_indices, final_indices)
-    return kept_indices
-
-#@tf.function
-def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold):
+def get_instances(cate_preds, mask_preds, score_threshold):
     """
     Convert model head outputs into per-instance masks/scores/classes.
 
     This function gathers all grid-cell/class pairs whose classification
-    probability exceeds `score_threshold`, upsamples their corresponding mask
-    logits to the given resized image shape, and returns tensors suitable for
-    downstream NMS.
+    probability exceeds `score_threshold`. It returns the corresponding
+    mask logits in their original low resolution (without upsampling).
 
     Args:
-        resized_h (int): Height of the resized/reference image for masks.
-        resized_w (int): Width of the resized/reference image for masks.
         cate_preds (tf.Tensor): Category logits of shape `[1, sum(S_i*S_i), C]` where `C` includes background at index 0.
         mask_preds (tf.Tensor): Mask kernels of shape `[1, H_l, W_l, sum(S_i*S_i)]`.
         score_threshold (float): Minimum class probability to keep a (cell, class) candidate.
 
     Returns:
         tuple: A tuple containing:
-            - selected_masks (tf.Tensor): Shape `(K, resized_h, resized_w)` with values in `[0, 1]` (after sigmoid + bilinear upsampling).
-            - selected_scores (tf.Tensor): Shape `(K,)` with per-instance class probabilities (after softmax over classes, background removed).
-            - selected_classes (tf.Tensor): Shape `(K,)` with zero-based foreground class indices (i.e., background class 0 is excluded).
+            - selected_masks (tf.Tensor): Shape `(K, H_l, W_l)` with values in `[0, 1]` (after sigmoid).
+            - selected_scores (tf.Tensor): Shape `(K,)` with per-instance class probabilities.
+            - selected_classes (tf.Tensor): Shape `(K,)` with zero-based foreground class indices.
+            - selected_cells (tf.Tensor): Shape `(K,)` with original cell indices (useful for debugging).
 
     Notes:
-        * If no candidate passes the threshold, returns three empty tensors.
+        * If no candidate passes the threshold, returns empty tensors.
         * This function assumes background occupies class index `0` in `cate_preds` and removes it for thresholding.
     """
 
     cate_out = cate_preds[0]  # => shape [sum(S_i*S_i), num_classes]
 
     mask_out = mask_preds[0]  # => shape (H_l, W_l, S_l^2)
-    mask_out = tf.transpose(mask_out, perm=[1, 2, 0])  # [H, W, Q]
+    mask_out = tf.transpose(mask_out, perm=[1, 2, 0])  # [H_l, W_l, Q]
 
-    # Convert category logits => per-class probabilities (sigmoid)
-    cate_prob = tf.nn.softmax(cate_out, axis=-1) # shape [sum(S_i*S_i), num_classes]
+    # Convert category logits => per-class probabilities (softmax)
+    cate_prob = tf.nn.softmax(cate_out, axis=-1)  # shape [sum(S_i*S_i), num_classes]
 
     # Convert mask logits => [0,1]
     mask_prob = tf.sigmoid(mask_out)  # shape (H_l, W_l, S_l^2)
@@ -199,46 +106,37 @@ def get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
     idx = tf.where(mask_bool)
 
     # Early exit if nothing passes the threshold
-    def _empty():
-        return (tf.zeros([0, resized_h, resized_w], tf.float32),
+    if tf.shape(idx)[0] == 0:
+        # Determine H_l, W_l from mask_out shape
+        H_l = tf.shape(mask_out)[0]
+        W_l = tf.shape(mask_out)[1]
+        return (tf.zeros([0, H_l, W_l], tf.float32),
                 tf.zeros([0], tf.float32),
+                tf.zeros([0], tf.int32),
                 tf.zeros([0], tf.int32))
 
-    def _non_empty():
-        selected_scores = tf.gather_nd(cate_prob, idx)  # [K]
-        selected_classes = tf.cast(idx[:, 1], tf.int32)  # [K]
-        selected_cells = tf.cast(idx[:, 0], tf.int32)  # [K]
+    selected_scores = tf.gather_nd(cate_prob, idx)  # [K]
+    selected_classes = tf.cast(idx[:, 1], tf.int32)  # [K]
+    selected_cells = tf.cast(idx[:, 0], tf.int32)  # [K]
 
-        # Resize all S mask channels once (vectorized), then gather
-        masks = tf.gather(mask_prob, selected_cells, axis=-1)  # [H_l, W_l, K]
-        masks = tf.transpose(masks, [2, 0, 1])  # [K, H_l, W_l]
-        masks = masks[..., tf.newaxis]  # [K, H_l, W_l, 1]
+    # Gather masks corresponding to selected cells
+    # mask_prob is [H_l, W_l, Q], we want to gather along axis -1 using selected_cells
+    masks = tf.gather(mask_prob, selected_cells, axis=-1)  # [H_l, W_l, K]
+    masks = tf.transpose(masks, [2, 0, 1])  # [K, H_l, W_l]
 
-        # Bilinear resize with antialiasing (keeps values soft in [0,1])
-        masks_up = tf.image.resize(
-            masks, [resized_h, resized_w],
-            method='bilinear', antialias=True
-        )  # [K, H', W', 1]
-        selected_masks = tf.squeeze(masks_up, axis=-1)  # [K, H', W']
-
-        return selected_masks, selected_scores, selected_classes
-
-    return tf.cond(tf.shape(idx)[0] > 0, _non_empty, _empty)
+    return masks, selected_scores, selected_classes, selected_cells
 
 
 def postprocess_model_outputs(
     cate_preds,          # Tensor of shape [1, sum(S_i*S_i), C]
     mask_preds,          # Tensor of shape [1, H_l, W_l, sum(S_i*S_i)]
-    resized_image_shape, # (resized_h, resized_w)
-    score_threshold=0.5,
-    nms_sigma=0.5
+    resized_image_shape,  # (resized_h, resized_w)
+    score_threshold=0.5
 ):
     """
     Convert raw model outputs into final instance predictions.
 
-    Runs candidate extraction (`get_instances`), applies Matrix NMS, and
-    returns a sorted list of instance dictionaries compatible with downstream
-    visualization or evaluation.
+    Runs candidate extraction (`get_instances`) and upsamples the masks.
 
     Args:
         cate_preds (tf.Tensor): Category logits of shape `[1, sum(S_i*S_i), C]`.
@@ -246,42 +144,61 @@ def postprocess_model_outputs(
         resized_image_shape (tuple): `(resized_h, resized_w)` used for upsampling masks.
         score_threshold (float, optional): Classification probability threshold for candidate selection.
             Defaults to `0.5`.
-        nms_sigma (float, optional): Sigma parameter for Matrix NMS decay. Defaults to `0.5`.
 
     Returns:
         list: A sorted list of instance dictionaries. Each item has keys:
             - `"class_id"` (int): Zero-based class index (without background).
-            - `"score"` (float): Final post-NMS score.
+            - `"score"` (float): Final score.
             - `"mask"` (np.ndarray): Binary mask of shape `(resized_h, resized_w)`,
               `dtype=uint8` with values in `{0,1}`.
-
-    Notes:
-        * If no candidates remain after thresholding/NMS, an empty list is returned.
-        * Returned masks are binarized at `0.5` after sigmoid.
     """
     resized_h, resized_w = resized_image_shape
 
-    all_masks_arr_tf, all_scores_arr_tf, all_classes_arr_tf = get_instances(resized_h, resized_w, cate_preds, mask_preds, score_threshold)
+    # get_instances now returns low-res masks: [K, H_l, W_l]
+    # No resizing inside get_instances
+    all_masks_low_res, all_scores, all_classes, _ = get_instances(
+        cate_preds, mask_preds, score_threshold
+    )
 
     # If no candidates, return empty
-    if all_masks_arr_tf.shape[0] == 0:
+    if tf.shape(all_masks_low_res)[0] == 0:
         return []
 
-    final_masks = (all_masks_arr_tf > 0.5).numpy().astype(np.uint8)
-    final_scores = all_scores_arr_tf.numpy()
-    final_classes = all_classes_arr_tf.numpy()
+    # Sort by score descending (visualization purposes)
+    # Note: get_instances output is not strictly sorted by score
+    sorted_indices = tf.argsort(all_scores, direction='DESCENDING')
+    final_scores = tf.gather(all_scores, sorted_indices)
+    final_classes = tf.gather(all_classes, sorted_indices)
+    final_masks_low = tf.gather(all_masks_low_res, sorted_indices)
+
+    # Upsample masks ONLY at the end
+    # Expand dims for resize: [K, H_l, W_l] -> [K, H_l, W_l, 1]
+    masks_expanded = final_masks_low[..., tf.newaxis]
+
+    # Bilinear resize to target resolution
+    masks_up = tf.image.resize(
+        masks_expanded, [resized_h, resized_w],
+        method='bilinear', antialias=True
+    )  # [K, resized_h, resized_w, 1]
+
+    # Squeeze back and binarize
+    masks_up = tf.squeeze(masks_up, axis=-1)  # [K, resized_h, resized_w]
+    final_masks_bool = (masks_up > 0.5)
+
+    # Convert to numpy for iteration
+    final_masks_np = final_masks_bool.numpy().astype(np.uint8)
+    final_scores_np = final_scores.numpy()
+    final_classes_np = final_classes.numpy()
 
     # Build the final instance list
     instances = []
-    for i in range(final_masks.shape[0]):
+    for i in range(final_masks_np.shape[0]):
         instances.append({
-            "class_id": int(final_classes[i]),
-            "score": float(final_scores[i]),
-            "mask": final_masks[i]
+            "class_id": int(final_classes_np[i]),
+            "score": float(final_scores_np[i]),
+            "mask": final_masks_np[i]
         })
 
-    # Sort again by descending final score for convenience
-    instances = sorted(instances, key=lambda x: x["score"], reverse=True)
     return instances
 
 
@@ -416,8 +333,7 @@ if __name__ == '__main__':
             cate_preds=class_outputs,
             mask_preds=mask_outputs,
             resized_image_shape=input_shape[:2],
-            score_threshold=cfg.score_threshold,
-            nms_sigma=0.5
+            score_threshold=cfg.score_threshold
         )
 
         # Draw an image for saving
@@ -431,5 +347,3 @@ if __name__ == '__main__':
         print(f"Saved annotated image: {save_path}")
 
     exit(0)
-
-

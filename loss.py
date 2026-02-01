@@ -4,16 +4,18 @@ Created: 2025-04-24
 Description: This script contains functions for the loss calculation.
 """
 
-import tensorflow as tf
+import os
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 from scipy.optimize import linear_sum_assignment
-from concurrent.futures import ThreadPoolExecutor
-import os
+import tensorflow as tf
+
 
 # Graph-Compatible Hungarian Matcher
 def batched_linear_sum_assignment(cost_matrix, valid_counts):
     """
-    Solves the matching problem for a batch with variable number of valid targets.
+    Solve the matching problem for a batch with variable number of valid targets.
 
     Args:
         cost_matrix (tf.Tensor): Cost matrix of shape [B, N, M].
@@ -45,8 +47,16 @@ def batched_linear_sum_assignment(cost_matrix, valid_counts):
 
 def solve_hungarian(cost, counts):
     """
-    The CPU-bound logic execution.
+    Execute the CPU-bound logic.
+
     Inputs are already numpy arrays here (thanks to tf.numpy_function).
+
+    Args:
+        cost (np.ndarray): Cost matrix.
+        counts (np.ndarray): Valid counts.
+
+    Returns:
+        tuple: Tuple containing flat rows, flat cols, and row lengths.
     """
     b = cost.shape[0]
 
@@ -93,7 +103,7 @@ def solve_hungarian(cost, counts):
 def calculate_match_costs(pred_cls, gt_cls, pred_mask_logits, gt_mask,
                           lambda_cls=2.0, lambda_ce=5.0, lambda_dice=5.0):
     """
-    Computes the cost matrix efficiently for Mask2Former matching.
+    Compute the cost matrix efficiently for Mask2Former matching.
 
     Args:
         pred_cls (tf.Tensor): Predicted class logits of shape [B, N, C].
@@ -149,7 +159,7 @@ def calculate_match_costs(pred_cls, gt_cls, pred_mask_logits, gt_mask,
 
 def focal_loss(logits, targets, alpha=None, gamma=2.0):
     """
-    Computes sigmoid/softmax focal loss.
+    Compute sigmoid/softmax focal loss.
 
     Args:
         logits (tf.Tensor): Predicted logits.
@@ -182,7 +192,7 @@ def focal_loss(logits, targets, alpha=None, gamma=2.0):
 
 def simple_dice_loss(pred_mask, gt_mask, eps=1e-5):
     """
-    Computes Dice loss on aligned (matched) pairs.
+    Compute Dice loss on aligned (matched) pairs.
 
     Args:
         pred_mask (tf.Tensor): Predicted masks of shape [Total_Matches, HW].
@@ -201,7 +211,7 @@ def simple_dice_loss(pred_mask, gt_mask, eps=1e-5):
 
 def simple_sigmoid_ce_loss(pred_logits, gt_mask):
     """
-    Computes binary cross-entropy loss on aligned (matched) pairs.
+    Compute binary cross-entropy loss on aligned (matched) pairs.
 
     Args:
         pred_logits (tf.Tensor): Predicted logits of shape [Total_Matches, HW].
@@ -216,7 +226,7 @@ def simple_sigmoid_ce_loss(pred_logits, gt_mask):
 
 def expand_targets(targets, n_indexes, m_indexes, batch_size, num_queries):
     """
-    Expands matched targets to the full shape [B, N, C].
+    Expand matched targets to the full shape [B, N, C].
 
     Unmatched queries default to Background (Class 0).
 
@@ -267,7 +277,7 @@ def mask2former_loss(
         dice_loss_weight=5.0
 ):
     """
-    Calculates Mask2Former loss efficiently.
+    Calculate Mask2Former loss efficiently.
 
     Args:
         cls_pred (tf.Tensor): Predicted class logits of shape [B, N, num_classes].
@@ -277,8 +287,8 @@ def mask2former_loss(
         valid_counts (tf.Tensor): Number of valid targets per image, shape [B].
         gt_is_padding (tf.Tensor): Boolean mask indicating padding, shape [B, M].
         cls_loss_weight (float, optional): Weight for classification loss. Defaults to 2.0.
-        mask_loss_weight (float, optional): Weight for mask cross-entropy loss. Defaults to 1.0.
-        dice_loss_weight (float, optional): Weight for Dice loss. Defaults to 1.0.
+        mask_loss_weight (float, optional): Weight for mask cross-entropy loss. Defaults to 5.0.
+        dice_loss_weight (float, optional): Weight for Dice loss. Defaults to 5.0.
 
     Returns:
         tuple: A tuple containing:
@@ -354,7 +364,7 @@ def mask2former_loss(
 
 def compute_multiscale_loss(pred_logits, pred_masks, class_target, mask_target, num_classes, aux_outputs=None):
     """
-    Main entry point for computing multi-scale Mask2Former loss.
+    Compute multi-scale Mask2Former loss.
 
     Args:
         pred_logits (tf.Tensor): Final predicted class logits.
