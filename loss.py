@@ -328,7 +328,6 @@ def mask2former_loss(
     expanded_targets = expand_targets(cls_target_sorted, row_indices, col_indices, B, N)
     loss_cls = focal_loss(cls_pred, expanded_targets, alpha=0.5)
 
-    # Mask losses for matched pairs only
     batch_ids = row_indices.value_rowids()
     flat_n = row_indices.values
     flat_m = col_indices.values

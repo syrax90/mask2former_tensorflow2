@@ -43,7 +43,6 @@ class SinePositionEmbedding(tf.keras.layers.Layer):
         Returns:
             tf.Tensor: Positional embeddings of shape [B, H, W, 2*num_pos_feats].
         """
-        # x: [B, H, W, C]
         B = tf.shape(x)[0]
         H = tf.shape(x)[1]
         W = tf.shape(x)[2]

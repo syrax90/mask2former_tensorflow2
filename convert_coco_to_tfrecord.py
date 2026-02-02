@@ -120,7 +120,6 @@ def ann_to_mask(ann, height, width):
         rles = coco_mask.frPyObjects(segm, height, width)
         rle = coco_mask.merge(rles)
     elif isinstance(segm, dict):
-        # RLE
         rle = segm
     else:
         raise TypeError("Unknown segmentation format.")

@@ -6,14 +6,14 @@ Description: This script draws dataset with masks by categories to understand wh
 
 
 import os
-from pycocotools.coco import COCO
+
 import tensorflow as tf
 import numpy as np
 import cv2
 import random
 
 from config import Mask2FormerConfig
-from coco_dataset_optimized import create_coco_tfrecord_dataset
+from coco_dataset_optimized import create_coco_tfrecord_dataset, COCOAnalysis
 import shutil
 
 def draw_instance_predictions(
@@ -26,6 +26,10 @@ def draw_instance_predictions(
     """
     Returns a BGR uint8 visualization with colored masks and optional class labels.
 
+    If the input image contains negative values, it is assumed to be zero-centered
+    ResNet50 preprocessed data (BGR). It will be denormalized by adding the mean.
+    Otherwise, it is treated as an RGB image in [0, 1] or [0, 255].
+
     Coloring, transparency and blending follow the behavior in draw_instance_masks():
       - random color per instance
       - alpha = 0.5
@@ -33,8 +37,10 @@ def draw_instance_predictions(
       - label near the first pixel of the mask
 
     Args:
-        image (tf.Tensor or np.ndarray): Input image of shape (H, W, 3), RGB.
-            Values can be in [0, 1] or [0, 255].
+        image (tf.Tensor or np.ndarray): Input image of shape (H, W, 3).
+            Can be:
+            1. RGB in [0, 1] or [0, 255]
+            2. BGR zero-centered (ResNet preprocessed)
         cate_target (tf.Tensor or np.ndarray): Category targets of shape [sum(S_i^2)].
             Values are int32, -1 for empty, otherwise category_id.
         mask_target (tf.Tensor or np.ndarray): Mask targets of shape [Hf, Wf, sum(S_i^2)].
@@ -47,17 +53,35 @@ def draw_instance_predictions(
     Returns:
         np.ndarray: The visualized image as a BGR uint8 array.
     """
+    if isinstance(image, tf.Tensor):
+        image = image.numpy()
+    if isinstance(cate_target, tf.Tensor):
+        cate_target = cate_target.numpy()
+    if isinstance(mask_target, tf.Tensor):
+        mask_target = mask_target.numpy()
 
-    # Convert to numpy
-    if isinstance(image, tf.Tensor):       image = image.numpy()
-    if isinstance(cate_target, tf.Tensor): cate_target = cate_target.numpy()
-    if isinstance(mask_target, tf.Tensor): mask_target = mask_target.numpy()
-
-    # Convert image to uint8 BGR
     img = image.copy()
-    if img.dtype != np.uint8:
-        img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
+    # Check for ResNet preprocessing (zero-centered, BGR, often negative values)
+    if np.min(img) < 0:
+        # Restore BGR image from zero-centered
+        # Mean values for ResNet: [103.939, 116.779, 123.68]
+        img[..., 0] += 103.939
+        img[..., 1] += 116.779
+        img[..., 2] += 123.68
+        img = np.clip(img, 0, 255).astype(np.uint8)
+        # It is already BGR, so we use it directly
+        vis = img
+    else:
+        # Standard RGB image handling
+        if img.dtype != np.uint8:
+            # Assume [0, 1] float if max <= 1.5 (safety margin)
+            if img.max() <= 1.5:
+                 img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+            else:
+                 img = np.clip(img, 0, 255).astype(np.uint8)
+        # Convert RGB to BGR for OpenCV
+        vis = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
     H, W = vis.shape[:2]
     Hf, Wf, C = mask_target.shape
@@ -85,7 +109,6 @@ def draw_instance_predictions(
         if mask_bin.sum() == 0:
             continue
 
-        # Random color per instance (same principle as your snippet)
         color = np.array([random.randint(0, 255) for _ in range(3)], dtype=np.float32)
 
         # Per-pixel alpha blend exactly like:
@@ -160,10 +183,9 @@ if gpus:
 
 if __name__ == '__main__':
     cfg = Mask2FormerConfig()
-    coco = COCO(cfg.train_annotation_path)
-    categories = coco.loadCats(coco.getCatIds())
-    # Create dictionary: {category_id: category_name}
-    coco_classes = {cat['id']: cat['name'] for cat in categories}
+    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    categories = coco_info.categories
+    coco_classes = {cat['id'] - 1: cat['name'] for cat in categories}
 
     num_classes = len(coco_classes)
     img_height, img_width = cfg.img_height, cfg.img_width
@@ -183,5 +205,3 @@ if __name__ == '__main__':
     os.makedirs(out_dir, exist_ok=True)
     save_dataset_preview(ds, coco_classes, out_dir, max_images=200)  # adjust as needed
     print(f"Saved previews to: {out_dir}")
-
-

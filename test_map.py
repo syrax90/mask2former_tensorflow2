@@ -9,30 +9,31 @@ import json
 import time
 import tensorflow as tf
 from config import Mask2FormerConfig
-from coco_dataset_optimized import create_coco_tfrecord_dataset, get_classes
+from coco_dataset_optimized import create_coco_tfrecord_dataset, COCOAnalysis
 from model_functions import Mask2FormerModel
 
 
-def get_dataset_to_model_map_from_json(json_path, num_classes, classes_path):
+def create_label_map(coco_info):
     """
-    Creates a mapping tensor from Dataset IDs to Model IDs.
+    Creates a mapping tensor from Dataset IDs (TFRecord values) to Model IDs.
+    
+    TFRecord contains `category_id - 1`.
+    Ideally, if IDs are contiguous 1..N, then `category_id - 1` is 0..N-1.
+    We create a map that supports the maximum ID found in the annotation.
 
     Args:
-        json_path (str): Unused. Kept for compatibility.
-        num_classes (int): Number of classes.
-        classes_path (str): Unused. Kept for compatibility.
+        coco_info (COCOAnalysis): Helper object with category info.
 
     Returns:
-        tf.Tensor: Identity mapping tensor of shape [num_classes + safety_buffer].
+        tf.Tensor: Mapping tensor.
     """
-    # Assume dataset IDs are already 0..num_classes-1 and match model classes.
-    # We provide a large enough identity map just in case.
-    # Size: num_classes + some buffer to avoid OOB on unexpected inputs (though they should be filtered)
-    map_size = num_classes + 1
-    return tf.range(map_size, dtype=tf.int32)
+    ids = coco_info.get_category_ids()
+    if not ids:
+        return tf.range(1, dtype=tf.int32)
+
+    return tf.range(max(ids) + 1, dtype=tf.int32)
 
 
-# Function to compute Intersection over Union (IoU)
 @tf.function(reduce_retracing=True)
 def compute_iou(pred_masks, gt_masks):
     """
@@ -49,7 +50,6 @@ def compute_iou(pred_masks, gt_masks):
     pred_flat = tf.reshape(pred_masks, (tf.shape(pred_masks)[0], -1))
     gt_flat = tf.reshape(gt_masks, (tf.shape(gt_masks)[0], -1))
 
-    # Cast to float32 for matmul
     pred_flat = tf.cast(pred_flat, tf.float32)
     gt_flat = tf.cast(gt_flat, tf.float32)
 
@@ -99,59 +99,36 @@ def process_single_image_predictions(
         tuple: (pred_scores, pred_labels, iou_matrix, gt_labels_mapped)
     """
 
-    # --- 1. Process Predictions ---
-    # Model Output: [Background, Class0, Class1, ...]
-    # We want to keep only Foreground classes.
-    # Scores: Discard index 0 (Background). Keep 1..end.
-    scores_fg = tf.nn.softmax(pred_logits, axis=-1)[:, 1:] # [Q, num_classes] (Indices 1..N are mapped to 0..N-1)
+    scores_fg = tf.nn.softmax(pred_logits, axis=-1)[:, 1:]
 
     # Get max score and class per query
     max_scores = tf.reduce_max(scores_fg, axis=-1)
-    # argmax gives index in generic [0..79] space, which is what we want
     pred_labels = tf.argmax(scores_fg, axis=-1, output_type=tf.int32)
 
     # Filter by score threshold
     keep_indices = tf.where(max_scores > score_threshold)[:, 0]
-
     kept_scores = tf.gather(max_scores, keep_indices)
     kept_labels = tf.gather(pred_labels, keep_indices)
     kept_mask_logits = tf.gather(pred_masks, keep_indices) # [N_kept, Hf, Wf]
 
-    # Upsample predicted masks to image size
-    # Expand dims for resize: [N_kept, Hf, Wf, 1]
     kept_mask_logits_exp = tf.expand_dims(kept_mask_logits, -1)
 
     # Resize to target size. Using bilinear for logits is ok, then threshold.
     pred_masks_up = tf.image.resize(kept_mask_logits_exp, (target_height, target_width), method='bilinear')
     pred_masks_up = tf.squeeze(pred_masks_up, -1) # [N_kept, H, W]
 
-    # Binarize (logits > 0)
     pred_masks_bin = tf.cast(pred_masks_up > 0.0, tf.float32)
 
-    # --- 2. Process Ground Truth ---
     # Filter out empty targets (-1) from dataset
     valid_gt_indices = tf.where(gt_cate_dataset > -1)[:, 0]
-
     gt_cats_raw = tf.gather(gt_cate_dataset, valid_gt_indices)
+    gt_labels_mapped = tf.gather(label_map, gt_cats_raw)
 
-    # MAP Dataset IDs to Model IDs
-    # Safely gather from map
-    # Check bounds first? If generic dataset, IDs could be anything.
-    # Fallback to identify if map is small? No, dynamic map should be big enough or identity.
-    # We assume label_map covers the range.
-
-    gt_labels_mapped = tf.gather(label_map, gt_cats_raw) # [N_gt]
-
-    # Filter out GTs that mapped to -1 (invalid classes, e.g. "street sign" / missing IDs)
-    # This shouldn't happen if dataset is clean COCO, but safe to handle.
     valid_mapped_mask = gt_labels_mapped > -1
     gt_labels_final = tf.boolean_mask(gt_labels_mapped, valid_mapped_mask)
     valid_gt_indices_final = tf.boolean_mask(valid_gt_indices, valid_mapped_mask)
 
-    # Fetch corresponding masks
-    gt_masks_grid = tf.gather(gt_mask_dataset, valid_gt_indices_final, axis=-1) # [Hf, Wf, N_gt]
-
-    # Check if we have any GT masks to resize
+    gt_masks_grid = tf.gather(gt_mask_dataset, valid_gt_indices_final, axis=-1)
     n_gt_active = tf.shape(gt_masks_grid)[-1]
 
     def resize_gt_masks():
@@ -162,14 +139,12 @@ def process_single_image_predictions(
     def empty_gt_masks():
         return tf.zeros((target_height, target_width, 0), dtype=gt_masks_grid.dtype)
 
-    # If N_gt > 0, resize. Else return empty.
     gt_masks_up = tf.cond(n_gt_active > 0, resize_gt_masks, empty_gt_masks)
 
     gt_masks_up = tf.transpose(gt_masks_up, perm=[2, 0, 1]) # [N_gt, H, W]
 
     gt_masks_bin = tf.cast(tf.cast(gt_masks_up, tf.float32) > 0.5, tf.float32)
 
-    # --- 3. Compute IoU ---
     n_pred = tf.shape(kept_scores)[0]
     n_gt = tf.shape(gt_labels_final)[0]
 
@@ -203,13 +178,8 @@ def compute_matches_single_tf(iou_matrix, iou_thresh):
         return dt_matched
 
     def body(i, gt_cov, dt_mat):
-        # i: current dt index (already sorted by score)
-        row = iou_matrix[i]  # [N_gt]
-
-        # Mask out covered GTs and check threshold
-        # valid: iou >= thresh AND not covered
+        row = iou_matrix[i]
         valid_mask = tf.logical_and(row >= iou_thresh, tf.logical_not(gt_cov))
-
         has_valid = tf.reduce_any(valid_mask)
 
         def match_found():
@@ -236,7 +206,7 @@ def compute_matches_single_tf(iou_matrix, iou_thresh):
         lambda i, g, d: i < n_dt,
         body,
         [0, gt_covered, dt_matched],
-        parallel_iterations=1,  # Serial execution required for greedy matching
+        parallel_iterations=1,
     )
 
     return dt_matched_final
@@ -288,13 +258,6 @@ class MAPEvaluator:
                 self.iou_thresholds, dtype=tf.float32
             )
 
-        # Storage:
-        # { cls_id: {
-        #      'scores': [list_of_tensors],
-        #      'matches': [list_of_tensors (N_thresh, N_dt)],
-        #      'n_gt': int
-        #   }
-        # }
         self.stats = {}
         for c in range(num_classes):
             self.stats[c] = {
@@ -313,21 +276,15 @@ class MAPEvaluator:
             iou_matrix (tf.Tensor): [N_dt, N_gt] IoU matrix.
             gt_labels (tf.Tensor): [N_gt] Ground truth labels.
         """
-        # Logic partially in Python to manage the Class dictionary structure,
-        # but heavy lifting in TF.
-
-        # 1. Get unique classes in this image
-        # Using TF for uniqueness
         all_labels = tf.concat([tf.cast(pred_labels, tf.int32), gt_labels], axis=0)
         unique_classes, _ = tf.unique(all_labels)
-        unique_classes = unique_classes.numpy()  # iterate in python
+        unique_classes = unique_classes.numpy()
 
         for cls_id in unique_classes:
             cls_id = int(cls_id)
             if cls_id not in self.stats:
                 continue
 
-            # tf.gather indices
             gt_indices = tf.where(tf.equal(gt_labels, cls_id))[:, 0]
             dt_indices = tf.where(tf.equal(pred_labels, cls_id))[:, 0]
 
@@ -352,12 +309,10 @@ class MAPEvaluator:
             cls_scores_sorted = tf.gather(cls_scores, sort_idx)
             cls_iou_mat_sorted = tf.gather(cls_iou_mat, sort_idx)
 
-            # Store scores
             self.stats[cls_id]["scores"].append(cls_scores_sorted)
 
             # Compute matches for all thresholds at once
             if n_gt_cls == 0:
-                # [N_thresh, N_dt] false
                 num_thresh = tf.shape(self.iou_thresholds)[0]
                 num_dt = tf.shape(dt_indices)[0]
                 matches = tf.zeros((num_thresh, num_dt), dtype=tf.bool)
@@ -438,23 +393,13 @@ class MAPEvaluator:
                 aps.append(0.0)
                 continue
 
-            all_scores = tf.concat(scores_list, axis=0)  # [Total_DT]
-
-            # Sort globally
+            all_scores = tf.concat(scores_list, axis=0)
             global_sort_idx = tf.argsort(all_scores, direction="DESCENDING")
 
             # Collect matches: List of [N_thresh, N_dt_batch] -> Concat -> [N_thresh, Total_DT]
             matches_list = self.stats[cls_id]["matches"]
-            # Concat along axis 1 (time/detection axis)
-            all_matches_matrix = tf.concat(matches_list, axis=1) # [N_thresh, Total_DT]
+            all_matches_matrix = tf.concat(matches_list, axis=1)
 
-            # Compute AP per threshold
-            # We can iterate over thresholds in Python (only 10 usually)
-            # but vectorized gathering is better.
-
-            # Reorder matches according to global sort
-            # global_sort_idx is [Total_DT]
-            # We want to shuffle the columns of all_matches_matrix
             all_matches_sorted = tf.gather(all_matches_matrix, global_sort_idx, axis=1)
 
             # Calculate AP for each threshold row
@@ -485,35 +430,24 @@ def main():
 
     Loads the validation dataset and model, runs inference, and computes mAP.
     """
-    # 1. Config
     cfg = Mask2FormerConfig()
 
-    # 2. Dataset
-    # Using 'test' TFRecords path as configured
     print(f"Loading test dataset from: {cfg.tfrecord_test_path}")
 
-    # Note: create_coco_tfrecord_dataset handles parsing
-    # We disable shuffle/augment for validation
     dataset = create_coco_tfrecord_dataset(
         train_tfrecord_directory=cfg.tfrecord_test_path,
         target_size=(cfg.img_height, cfg.img_width),
-        batch_size=1, # Evaluating one by one is simpler for mAP matching
+        batch_size=1,
         scale=cfg.image_scales[0],
         deterministic=True,
         augment=False,
         shuffle_buffer_size=None,
-        number_images=None # Process all
+        number_images=None
     )
 
-    # 3. Model
-    # Get classes to determine count (should be 80 for COCO)
-    # If file missing, default to 80
-    if os.path.exists(cfg.classes_path):
-        class_names = get_classes(cfg.classes_path)
-        num_classes = len(class_names)
-    else:
-        print(f"Classes file {cfg.classes_path} not found. Defaulting to 80 classes.")
-        num_classes = 80
+    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    num_classes = coco_info.get_num_classes()
+    print(f"Number of classes detected: {num_classes}")
 
     model = Mask2FormerModel(
         input_shape=(cfg.img_height, cfg.img_width, 3),
@@ -524,12 +458,10 @@ def main():
         num_heads=8,
         dim_feedforward=1024
     )
-    # Build model
     dummy_input = tf.zeros((1, cfg.img_height, cfg.img_width, 3))
     model(dummy_input)
 
-    # Load weights
-    checkpoint_dir = cfg.test_model_path # Or model_path
+    checkpoint_dir = cfg.test_model_path
     if not os.path.exists(checkpoint_dir):
         print(f"Checkpoint directory {checkpoint_dir} does not exist.")
         return
@@ -543,35 +475,20 @@ def main():
     else:
         print("No checkpoint found! Running with random weights (mAP will be garbage).")
 
-    # 4. Evaluation Loop
     evaluator = MAPEvaluator(num_classes)
-
-    score_thresh = 0.05 # Optimization: ignore very low confidence predictions
-
-    # Init label map
-    label_map = get_dataset_to_model_map_from_json(cfg.train_annotation_path, num_classes, cfg.classes_path)
+    score_thresh = 0.05
+    label_map = create_label_map(coco_info)
 
     start_time = time.time()
 
-    # Inference
     @tf.function
     def predict_step(img):
-        """
-        Runs one inference step.
-        """
         return model(img, training=False)
 
     print("Starting evaluation...")
     for i, (image, cate_target, mask_target) in enumerate(dataset):
-        # image: [1, H, W, 3]
-        # cate_target: [1, K]
-        # mask_target: [1, Hf, Wf, K]
-
-        # Inference
         pred_logits, pred_masks, _ = predict_step(image)
 
-        # Squeeze batch dim since batch_size=1
-        # Process graph-optimized
         s, l, iou, gl = process_single_image_predictions(
             pred_logits[0], pred_masks[0],
             cate_target[0], mask_target[0],
@@ -581,8 +498,6 @@ def main():
             score_threshold=score_thresh
         )
 
-        # Update python stats (numpy) since unique_classes needs python iteration,
-        # but inputs are Tensors now.
         evaluator.update(s, l, iou, gl)
 
         if (i + 1) % 100 == 0:
@@ -591,7 +506,6 @@ def main():
     total_time = time.time() - start_time
     print(f"Evaluation finished in {total_time:.2f}s")
 
-    # 5. Compute mAP
     mean_ap = evaluator.calculate_map()
     print(f"mAP: {mean_ap:.4f}")
 

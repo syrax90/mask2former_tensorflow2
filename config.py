@@ -16,7 +16,7 @@ class Mask2FormerConfig(object):
     def __init__(self):
         self.coco_root_path = '/home/syrax/ml/datasets/Cocodataset2017'
         self.train_annotation_path = f'{self.coco_root_path}/annotations/instances_train2017.json'
-        self.classes_path = 'data/coco_classes.txt'
+
         self.images_path = f'{self.coco_root_path}/train2017/'
         self.include_background=False    # Exclude background 0th class for custom COCO dataset
         self.number_images=None  # Restriction for dataset. Set None to get rid of the restriction
@@ -37,8 +37,6 @@ class Mask2FormerConfig(object):
         self.approx_coco_train_size = 118287
         # Number of epochs
         self.epochs = 100
-        # Model weights file prefix
-        self.model_weights_prefix = 'coco'
 
         self.image_scales = [0.25]
         self.augment = True

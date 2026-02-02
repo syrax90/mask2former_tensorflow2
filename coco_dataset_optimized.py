@@ -5,6 +5,7 @@ Description: This script contains classes and functions of COCO dataset optimize
 """
 
 import os
+
 from typing import Optional, Tuple
 
 import tensorflow as tf
@@ -31,23 +32,48 @@ _FEATURES = {
 }
 
 
-def get_classes(classes_path):
-    """
-    Load class names from a text file.
 
-    Each line in the file is assumed to represent a single class name.
-    The function reads all lines, strips whitespace, and returns a list of class names.
+from pycocotools.coco import COCO
+
+
+class COCOAnalysis:
+    """
+    Helper class to analyze COCO annotation file and extract class information.
 
     Args:
-        classes_path (str): Path to the text file containing class names, one per line.
-
-    Returns:
-        List[str]: A list of class names as strings, with leading and trailing whitespace removed.
+        annotation_path (str): Path to the COCO annotation JSON file.
     """
-    with open(classes_path) as f:
-        class_names = f.readlines()
-    class_names = [c.strip() for c in class_names]
-    return class_names
+    def __init__(self, annotation_path: str):
+        self.coco = COCO(annotation_path)
+        self.category_ids = sorted(self.coco.getCatIds())
+        self.categories = self.coco.loadCats(self.category_ids)
+
+    def get_num_classes(self) -> int:
+        """
+        Get the number of classes defined in the annotation file.
+
+        Returns:
+            int: The number of classes.
+        """
+        return len(self.category_ids)
+
+    def get_class_names(self) -> list:
+        """
+        Get the list of class names.
+
+        Returns:
+            list: A list of class names.
+        """
+        return [cat["name"] for cat in self.categories]
+
+    def get_category_ids(self) -> list:
+        """
+        Get the list of category IDs.
+
+        Returns:
+            list: A list of category IDs.
+        """
+        return self.category_ids
 
 
 def sparse_to_dense_1d(v, dtype):
@@ -300,7 +326,6 @@ def parse_example(
     target_mask_height = tf.cast(tf.round(target_height * scale), tf.int32)
     target_mask_width = tf.cast(tf.round(target_width * scale), tf.int32)
 
-    # [N, H, W] -> [N, H, W, 1]
     masks_expanded = tf.expand_dims(masks, axis=-1)
 
     # Use Nearest Neighbor for masks to preserve binary nature logic better than bilinear
@@ -317,7 +342,7 @@ def parse_example(
     # Ensuring it's 0/1
     masks_resized = tf.cast(masks_resized > 127, tf.uint8)
 
-    masks_resized = tf.transpose(masks_resized, perm=[1, 2, 0])  # [new_h,new_w,N] for later use
+    masks_resized = tf.transpose(masks_resized, perm=[1, 2, 0])
     cat_ids = cat_ids - 1  # convert to 0-based category ids
 
     return image_resized, cat_ids, masks_resized
@@ -373,7 +398,6 @@ def create_coco_tfrecord_dataset(
 
     ds = tf.data.TFRecordDataset(files, num_parallel_reads=len(files))
 
-    # Shuffle
     if shuffle_buffer_size is not None:
         ds = ds.shuffle(buffer_size=shuffle_buffer_size, reshuffle_each_iteration=True)
 
