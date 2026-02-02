@@ -33,6 +33,7 @@ The code supports datasets in the COCO format. We recommend creating your own da
 Alternatively, you can use the original [COCO dataset](https://cocodataset.org/#home), which contains 80 object categories. You can also train your own large dataset because the model suits well for this task.
 
 For high-performance results we chose TFRecord format for the dataset. TensorFlow is able to use TFRecord format files for parallel reading and is compatible with TensorFlow Graph Mode. To use the dataset, follow these steps:
+
 1) Convert your COCO dataset to TFRecord files:
 
 ```bash
@@ -43,10 +44,19 @@ python convert_coco_to_tfrecord.py \
   --num_shards 4
 ```
 
+```bash
+python convert_coco_to_tfrecord.py \
+  --images_root /path/to/images \
+  --annotations /path/to/instances_val.json \
+  --output /path/to/out/test.tfrecord \
+  --num_shards 4
+```
+
 2) Set corresponding settings in `config.py` file:
 
 ```python
-self.tfrecord_dataset_directory_path  = 'path/to/tfrecords/directory'
+self.tfrecord_dataset_directory_path  = 'path/to/tfrecords/train/directory'
+self.tfrecord_test_path = 'path/to/tfrecords/test/directory'
 ```
 
 ## Configuration
@@ -174,6 +184,23 @@ It is possible to evaluate the data fed to the model before training to ensure t
 This script generates images with instance masks and their corresponding category labels. The outputs are saved in `images/dataset_test`.
 
 By default, it processes the first 200 randomly selected images. To change or remove this limit, edit `test_dataset.py`.
+
+
+## Test mAP
+
+There is possibility to evaluate how accurate the model is.
+
+1) Set the path to the test dataset in config file:
+
+```python
+self.tfrecord_test_path = path/to/tfrecords/test/directory'  # Path to TFRecord test dataset directory. Used for mAP calculation.
+```
+
+2) Run the test mAP script:
+
+```bash
+python test_map.py
+```
 
 ## Tasks for nearest future
 
