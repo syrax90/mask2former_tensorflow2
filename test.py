@@ -10,10 +10,10 @@ import random
 
 import numpy as np
 import tensorflow as tf
-from pycocotools.coco import COCO
+
 
 from config import Mask2FormerConfig
-from coco_dataset_optimized import get_classes
+from coco_dataset_optimized import COCOAnalysis
 from model_functions import Mask2FormerModel
 import logging
 
@@ -50,9 +50,7 @@ def preprocess_image(image_path, input_size=(320, 320)):
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     original_shape = img.shape[:2]  # (H, W)
 
-    # Resize
     img_resized = cv2.resize(img, input_size)
-    # Replaced 0-1 scaling with ResNet50 preprocessing to match training data
     img_resized = img_resized.astype(np.float32)
     # Note: preprocess_input assumes RGB and might zero-center the data (not necessarily [0,1]).
     img_resized = tf.keras.applications.resnet50.preprocess_input(img_resized)
@@ -90,24 +88,18 @@ def get_instances(cate_preds, mask_preds, score_threshold):
     mask_out = mask_preds[0]  # => shape (H_l, W_l, S_l^2)
     mask_out = tf.transpose(mask_out, perm=[1, 2, 0])  # [H_l, W_l, Q]
 
-    # Convert category logits => per-class probabilities (softmax)
     cate_prob = tf.nn.softmax(cate_out, axis=-1)  # shape [sum(S_i*S_i), num_classes]
 
-    # Convert mask logits => [0,1]
     mask_prob = tf.sigmoid(mask_out)  # shape (H_l, W_l, S_l^2)
 
     # Get rid of the background. Assume background has 0th index
     cate_prob = cate_prob[..., 1:]
 
-    # Threshold in one shot (multi-label)
     mask_bool = cate_prob >= tf.cast(score_threshold, tf.float32)  # shape (S_l*S_l, C)
 
-    # Get indices of (cell, class) pairs and their scores
     idx = tf.where(mask_bool)
 
-    # Early exit if nothing passes the threshold
     if tf.shape(idx)[0] == 0:
-        # Determine H_l, W_l from mask_out shape
         H_l = tf.shape(mask_out)[0]
         W_l = tf.shape(mask_out)[1]
         return (tf.zeros([0, H_l, W_l], tf.float32),
@@ -118,8 +110,6 @@ def get_instances(cate_preds, mask_preds, score_threshold):
     selected_scores = tf.gather_nd(cate_prob, idx)  # [K]
     selected_classes = tf.cast(idx[:, 1], tf.int32)  # [K]
     selected_cells = tf.cast(idx[:, 0], tf.int32)  # [K]
-
-    # Gather masks corresponding to selected cells
     # mask_prob is [H_l, W_l, Q], we want to gather along axis -1 using selected_cells
     masks = tf.gather(mask_prob, selected_cells, axis=-1)  # [H_l, W_l, K]
     masks = tf.transpose(masks, [2, 0, 1])  # [K, H_l, W_l]
@@ -154,43 +144,33 @@ def postprocess_model_outputs(
     """
     resized_h, resized_w = resized_image_shape
 
-    # get_instances now returns low-res masks: [K, H_l, W_l]
-    # No resizing inside get_instances
     all_masks_low_res, all_scores, all_classes, _ = get_instances(
         cate_preds, mask_preds, score_threshold
     )
 
-    # If no candidates, return empty
     if tf.shape(all_masks_low_res)[0] == 0:
         return []
 
-    # Sort by score descending (visualization purposes)
-    # Note: get_instances output is not strictly sorted by score
     sorted_indices = tf.argsort(all_scores, direction='DESCENDING')
     final_scores = tf.gather(all_scores, sorted_indices)
     final_classes = tf.gather(all_classes, sorted_indices)
     final_masks_low = tf.gather(all_masks_low_res, sorted_indices)
 
     # Upsample masks ONLY at the end
-    # Expand dims for resize: [K, H_l, W_l] -> [K, H_l, W_l, 1]
     masks_expanded = final_masks_low[..., tf.newaxis]
 
-    # Bilinear resize to target resolution
     masks_up = tf.image.resize(
         masks_expanded, [resized_h, resized_w],
         method='bilinear', antialias=True
     )  # [K, resized_h, resized_w, 1]
 
-    # Squeeze back and binarize
     masks_up = tf.squeeze(masks_up, axis=-1)  # [K, resized_h, resized_w]
     final_masks_bool = (masks_up > 0.5)
 
-    # Convert to numpy for iteration
     final_masks_np = final_masks_bool.numpy().astype(np.uint8)
     final_scores_np = final_scores.numpy()
     final_classes_np = final_classes.numpy()
 
-    # Build the final instance list
     instances = []
     for i in range(final_masks_np.shape[0]):
         instances.append({
@@ -235,7 +215,6 @@ def draw_instance_masks(
 
     for inst in instances:
         mask_resized = inst["mask"]
-        # Upsample to original image size
         mask_orig = cv2.resize(
             mask_resized.astype(np.uint8),
             (orig_w, orig_h),
@@ -243,14 +222,10 @@ def draw_instance_masks(
         )
         # mask_orig => shape (orig_h, orig_w) in {0,1}
 
-        # Color overlay
-        color = [random.randint(0, 255) for _ in range(3)]
-        alpha = 0.5
         vis_image[mask_orig == 1] = (
             alpha * np.array(color) + (1 - alpha) * vis_image[mask_orig == 1]
         )
 
-        # Draw class label near the first pixel of mask
         ys, xs = np.where(mask_orig == 1)
         if len(ys) > 0:
             y0, x0 = ys[0], xs[0]
@@ -268,7 +243,6 @@ def draw_instance_masks(
 
     return vis_image
 
-# Enable dynamic memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
     try:
@@ -280,17 +254,14 @@ if gpus:
 if __name__ == '__main__':
     cfg = Mask2FormerConfig()
 
-    classes_path = cfg.classes_path
     model_path = cfg.test_model_path
     input_shape = (cfg.img_height, cfg.img_width, 3)
-    coco = COCO(cfg.train_annotation_path)
-    categories = coco.loadCats(coco.getCatIds())
-    # Create dictionary: {category_id: category_name}
+    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    categories = coco_info.categories
     coco_classes = {cat['id'] - 1: cat['name'] for cat in categories}
 
-    # Workaround because of NGC's TensorFlow version
-    class_names = get_classes(cfg.classes_path)
-    num_classes = len(class_names)
+    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    num_classes = coco_info.get_num_classes()
     img_height, img_width = cfg.img_height, cfg.img_width
     model = Mask2FormerModel(
         input_shape=(img_height, img_width, 3),
@@ -304,7 +275,6 @@ if __name__ == '__main__':
     model.build((None, img_height, img_width, 3))
 
     checkpoint = tf.train.Checkpoint(model=model)
-    # Check if model_path is a directory (default CheckpointManager dir) or specific file
     checkpoint_path = model_path
     if os.path.isdir(checkpoint_path):
         checkpoint_path = tf.train.latest_checkpoint(checkpoint_path)
@@ -327,7 +297,6 @@ if __name__ == '__main__':
 
         class_outputs, mask_outputs, _ = model.predict(img_batch)
 
-        # Postprocess All Levels (scales)
         all_instances = []
         instances = postprocess_model_outputs(
             cate_preds=class_outputs,
@@ -336,11 +305,9 @@ if __name__ == '__main__':
             score_threshold=cfg.score_threshold
         )
 
-        # Draw an image for saving
         img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
         annotated_img = draw_instance_masks(img_bgr, instances, show_labels=True, class_names=coco_classes)
 
-        # Save output
         output_filename = os.path.basename(image_path)
         save_path = os.path.join('images/res', output_filename)
         cv2.imwrite(save_path, annotated_img)

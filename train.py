@@ -9,7 +9,7 @@ import os
 import logging
 import tensorflow as tf
 import tensorflow.keras.layers as layers
-from coco_dataset_optimized import create_coco_tfrecord_dataset, get_classes
+from coco_dataset_optimized import create_coco_tfrecord_dataset, COCOAnalysis
 from config import Mask2FormerConfig
 from model_functions import Mask2FormerModel
 from loss import compute_multiscale_loss
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 tf.keras.backend.clear_session()
 
-# Enable dynamic memory growth
 gpus = tf.config.experimental.list_physical_devices('GPU')
 if gpus:
     try:
@@ -244,8 +243,8 @@ def run_one_epoch_accumulated_mode(model,
 if __name__ == '__main__':
     cfg = Mask2FormerConfig()
 
-    class_names = get_classes(cfg.classes_path)
-    num_classes = len(class_names)
+    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    num_classes = coco_info.get_num_classes()
     batch_size = cfg.batch_size
     img_height, img_width = cfg.img_height, cfg.img_width
 

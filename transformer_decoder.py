@@ -109,7 +109,6 @@ class MaskedMultiHeadAttention(Layer):
 
         return output
 
-# Transformer decoder building blocks
 class TransformerDecoderLayer(Layer):
     """
     A single Transformer decoder layer:
@@ -300,7 +299,6 @@ class TransformerDecoder(Layer):
         """
         # mask_preds shape: (Batch, Num_Queries, H, W)
 
-        # 1. Resize logic
         if img_shape is not None:
             # Transpose to (Batch, H, W, Num_Queries) for tf.image.resize
             mask_preds_t = tf.transpose(mask_preds, perm=[0, 2, 3, 1])
@@ -315,7 +313,7 @@ class TransformerDecoder(Layer):
             # Transpose back to (Batch, Num_Queries, H, W)
             mask_preds = tf.transpose(mask_preds_resized, perm=[0, 3, 1, 2])
 
-        # 2. Flatten spatial dimensions -> (Batch, Num_Queries, H*W)
+        # Flatten spatial dimensions -> (Batch, Num_Queries, H*W)
         batch_size = tf.shape(mask_preds)[0]
         num_queries = tf.shape(mask_preds)[1]
 

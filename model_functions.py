@@ -35,7 +35,6 @@ def get_resnet50_backbone(input_shape=(480, 480, 3)):
     )
     backbone.trainable = True
 
-    # ResNet feature maps
     c2_output = backbone.get_layer("conv2_block3_out").output  # stride 4
     c3_output = backbone.get_layer("conv3_block4_out").output  # stride 8
     c4_output = backbone.get_layer("conv4_block6_out").output  # stride 16
@@ -282,4 +281,3 @@ class Mask2FormerModel(tf.keras.Model):
         )
 
         return pred_logits, pred_masks, aux_outputs
-
