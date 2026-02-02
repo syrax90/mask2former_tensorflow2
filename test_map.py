@@ -5,7 +5,6 @@ Description: This script calculates Mean Average Precision (mAP) for the Mask2Fo
 """
 
 import os
-import json
 import time
 import tensorflow as tf
 from config import Mask2FormerConfig

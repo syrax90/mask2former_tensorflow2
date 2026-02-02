@@ -1,6 +1,6 @@
 """
 Author: Pavel Timonin
-Created: 2025-04-24
+Created: 2025-09-28
 Description: This script draws dataset with masks by categories to understand what data we fit to the model.
 """
 

@@ -1,7 +1,7 @@
 """
 Author: Pavel Timonin
-Created: 2025-04-24
-Description: This script contains classes and functions for Mask2Former model building.
+Created: 2025-09-28
+Description: This script contains classes and functions for Multi-Scale Deformable Pixel Decoder.
 """
 
 import tensorflow as tf
