@@ -1,15 +1,12 @@
 """
 Author: Pavel Timonin
-Created: 2025-04-24
+Created: 2025-09-28
 Description: This script contains classes and functions for Mask2Former model building.
 """
 
 import tensorflow as tf
 from tensorflow.keras.applications import ResNet50
 from tensorflow.keras.layers import (
-    Conv2D,
-    UpSampling2D,
-    Add,
     Dense,
     Layer,
 )

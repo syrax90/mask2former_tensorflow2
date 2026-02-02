@@ -1,6 +1,6 @@
 """
 Author: Pavel Timonin
-Created: 2025-04-24
+Created: 2025-09-28
 Description: This script performs the model testing process.
 """
 
@@ -221,6 +221,9 @@ def draw_instance_masks(
             interpolation=cv2.INTER_NEAREST
         )
         # mask_orig => shape (orig_h, orig_w) in {0,1}
+        # Color overlay
+        color = [random.randint(0, 255) for _ in range(3)]
+        alpha = 0.5
 
         vis_image[mask_orig == 1] = (
             alpha * np.array(color) + (1 - alpha) * vis_image[mask_orig == 1]

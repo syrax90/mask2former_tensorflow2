@@ -2,7 +2,7 @@
 
 This project is an implementation of **Mask2Former** using the TensorFlow framework. The goal is to provide a clear explanation of how Mask2Former works and demonstrate how the model can be implemented with TensorFlow.
 
-## About SOLO
+## About Mask2Former
 
 Mask2Former is a model designed for computer vision tasks, specifically instance segmentation.
 > [**Masked-attention Mask Transformer for Universal Image Segmentation**](https://arxiv.org/abs/2112.01527),
@@ -11,114 +11,134 @@ Mask2Former is a model designed for computer vision tasks, specifically instance
 
 To understand instance segmentation better, consider the example below, where multiple objects—whether of the same or different classes—are identified as separate instances, each with its own segmentation mask (and the probability of belonging to a certain class):   
 
-![Instance segmentation picture](images/readme/my_photo_with_masks.png)  
+![Instance segmentation picture](images/readme/my_photo_with_masks.jpg)
 
-This project implements the **Mask2Former** variant:
-
-![Mask2Former plot](images/readme/dynamic_solo_plot_my_photo.png)
-
-## Who This Project is For
-
-It is primarily intended for educational purposes—especially for individuals without high-performance GPUs who are interested in learning about computer vision and the Mask2Former model. We chose TensorFlow to make the implementation accessible. The code is thoroughly documented to ensure clarity and ease of understanding. However, the code is well optimized for use in production-ready tasks.
+Current implementation of Mask2Former applies ResNet-50 as a backbone.
 
 ## Installation, Dependencies, and Requirements
 
-- Python 3.12.3 is required.
+The project has been tested on <strong>Ubuntu 24.04.2 LTS</strong> with <strong>nvcr.io/nvidia/tensorflow:25.02-tf2-py3 container using TensorFlow 2.17.0</strong>. It may work on other operating systems and TensorFlow versions (older than 2.17.0), but we cannot guarantee compatibility.
+
+If you don't use the container, you need to install the following dependencies:
+
+- Python 3.12.3
 - All dependencies are listed in `requirements.txt`.
 - Use `setup.sh` to install all dependencies on Linux.
 
-The project has been tested on <strong>Ubuntu 24.04.2 LTS</strong> with <strong>nvcr.io/nvidia/tensorflow:25.02-tf2-py3 container using TensorFlow 2.17.0</strong>. It may work on other operating systems and TensorFlow versions (older than 2.17.0), but we cannot guarantee compatibility.
-
-> <strong>Note:</strong> A GPU with CUDA support is highly recommended to speed up training. The project currently does not support multi-GPU training.
+> <strong>Note:</strong> A GPU with CUDA support is highly recommended to speed up training.
 
 ## Datasets
 
 The code supports datasets in the COCO format. We recommend creating your own dataset to better understand the full training cycle, including data preparation. [LabelMe](https://github.com/wkentaro/labelme) is a good tool for this. You don’t need a large dataset or many classes to begin training and see results. This makes it easier to experiment and learn without requiring powerful hardware.  
-Alternatively, you can use the original [COCO dataset](https://cocodataset.org/#home), which contains 80 object categories.
+Alternatively, you can use the original [COCO dataset](https://cocodataset.org/#home), which contains 80 object categories. You can also train your own large dataset because the model suits well for this task.
 
-For high-performance tasks we recommend using the dataset generator from `coco_dataset_optimized.py`. The dataset interacts with TFRecord format files using parallel reading and compatible with TensorFlow Graph Mode. To use the dataset, follow these steps:
+For high-performance results we chose TFRecord format for the dataset. TensorFlow is able to use TFRecord format files for parallel reading and is compatible with TensorFlow Graph Mode. To use the dataset, follow these steps:
 1) Convert your COCO dataset to TFRecord files:
-```
+
+```bash
 python convert_coco_to_tfrecord.py \
   --images_root /path/to/images \
   --annotations /path/to/instances_train.json \
   --output /path/to/out/train.tfrecord \
   --num_shards 4
 ```
+
 2) Set corresponding settings in `config.py` file:
-```
-self.use_optimized_dataset = True
-self.tfrecord_dataset_directory_path = 'path/to/tfrecords/directory'
+
+```python
+self.tfrecord_dataset_directory_path  = 'path/to/tfrecords/directory'
 ```
 
 ## Configuration
 
 All configuration parameters are defined in `config.py` file within the `Mask2FormerConfig` class.
 
-Set the path to your COCO dataset:  
+(Optionally) Set the path to your COCO root directory:
 
+```python
+self.coco_root_path = '/path/to/your/coco/root/directory'
 ```
-self.coco_root_path = '/path/to/your/coco/dataset'
+
+Set the path to your COCO training dataset:
+
+```python
+self.tfrecord_dataset_directory_path  = 'path/to/tfrecords/directory'
 ```
 
 Set the path to the dataset's annotation file:  
 
-```
+```python
 self.train_annotation_path = f'{self.coco_root_path}/annotations/instances_train2017.json'
-```
-
-You have to generate a file containing a list of classes. For example `coco_classes.txt`. It is located next to the project as an example. Set the path to the classes file:  
-
-```
-self.classes_path = 'data/coco_classes.txt'
-```
-
-Set the path to the training images:  
-
-```
-self.images_path = f'{self.coco_root_path}/train2017/'
 ```
 
 And you can find other intuitive parameters:
 
-```
+```python
 # Image parameters
-self.img_height = 320
-self.img_width = 320
+self.img_height = 480
+self.img_width = 480
 
-# If load_previous_model = True: load the previous model weights (example: './weights/coco_epoch00001000.keras')
+# If load_previous_model = True: load the previous model weights.
 self.load_previous_model = False
 self.lr = 0.0001
-self.batch_size = 8
-# If load_previous_model = True, you need to specify self.model_path to indicate which model to read the weights from to continue training.
-self.model_path = './weights/coco_epoch00000001.keras'
+self.batch_size = 16
+# If load_previous_model = True, the code will look for the latest checkpoint in this directory or use this path if it is a specific checkpoint file.
+self.model_path = './checkpoints'  # example for specific checkpoint: self.model_path = './checkpoints/ckpt-5'
 
 # Save the model weights every save_iter epochs:
 self.save_iter = 1
+self.approx_coco_train_size = 118287
+# Number of epochs
+self.epochs = 100
+
+# Testing configuration
+self.test_model_path = './checkpoints'  # example for specific checkpoint: self.test_model_path = './checkpoints/ckpt-5'
+self.score_threshold = 0.5
+
+# Accumulation mode
+self.use_gradient_accumulation_steps = False
+self.accumulation_steps = 8
+
+# Dataset options
+self.tfrecord_test_path = f'{self.coco_root_path}/tfrecords/test'  # Path to TFRecord test dataset directory. Used for mAP calculation.
+self.image_scales = [0.25]
+self.augment = True
+self.shuffle_buffer_size = 4096  # TFRecord dataset shuffle buffer size. Set to None to disable shuffling
+self.warmup_steps = 10000
 ```
+
+## Docker file
+
+The docker file is available in the `docker` directory. nvcr.io/nvidia/tensorflow:25.02-tf2-py3 doesn't contain all the required dependencies, so we use the container from the `docker` directory.
 
 ## Training
 
 To start training, run:
 
-```
+```bash
 python train.py
 ```
 
-Model weights are saved in the `weights` directory every `cfg.save_iter` epochs.
+Using the container:
+
+```bash
+docker run --rm --ipc host --gpus all -v /path/to/Mask2Former/directory:/opt/project -v /path/to/datasets/Cocodataset2017:/path/to/datasets/Cocodataset2017 -w /opt/project --entrypoint=  my-tf:latest python train.py
+```
+
+Model weights are saved in the `checkpoints` directory every `cfg.save_iter` epochs.
 
 To proceed training:
 
 1) Set configuration parameter `load_previous_model` to `True`:
 
-```
+```python
 self.load_previous_model = True
 ```
 
-2) Set the path to the previously saved model:
+2) Set the path to the previously saved model. By default, the latest checkpoint will be used:
 
-```
-self.model_path = './weights/coco_epoch00000001.keras'
+```python
+self.model_path = './checkpoints'  # example for specific checkpoint: self.model_path = './checkpoints/ckpt-5'
 ```
 
 ## Testing
@@ -127,40 +147,39 @@ To test the model:
 
 1) Move your test images in the `/images/test` directory.
 
-2) In the config file, set the path to the model you want to test:
+2) In the config file, set the path to the model weights you want to test. By default, the latest checkpoint will be used:
 
-```
-self.test_model_path = './weights/coco_epoch00000001.keras'
+```python
+self.test_model_path = './checkpoints'  # example for specific checkpoint: self.test_model_path = './checkpoints/ckpt-5'
 ```
 
 3) Run the test script:
 
-```
+```bash
 python test.py
 ```
 
-Output images with masks, class labels, and probabilities will be saved in the `/images/res` directory.
+Using the container:
+
+```bash
+docker run --rm --ipc host --gpus all -v /path/to/Mask2Former/directory:/opt/project -v /path/to/datasets/Cocodataset2017:/path/to/datasets/Cocodataset2017 -w /opt/project --entrypoint=  my-tf:latest python test.py
+```
+
+Output images with masks and class labels will be saved in the `/images/res` directory.
 
 ## Dataset Evaluation
 
 It is possible to evaluate the data fed to the model before training to ensure that the masks, classes, and scales are applied correctly:
 
-```
-python test_dataset.py
-```
-
 This script generates images with instance masks and their corresponding category labels. The outputs are saved in `images/dataset_test`.
 
-By default, it processes the first 20 images. To change or remove this limit, edit `test_dataset.py`:
+By default, it processes the first 200 randomly selected images. To change or remove this limit, edit `test_dataset.py`.
 
-```
-number_images=20
-```
+## Tasks for nearest future
 
+1. Implement PointRend (Point Sampling) for high-resolution images processing.
+2. Add support for multi GPU training.
 
-## Thank you!
+## Thank you
 
-We appreciate your interest and contributions toward improving this project. Happy learning!
-
-
-
+We appreciate your interest and contributions toward improving this project. Happy learning and using Mask2Former!
