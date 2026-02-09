@@ -7,7 +7,8 @@ Description: This script contains classes and functions of COCO dataset optimize
 import os
 
 from typing import Optional, Tuple
-
+from pycocotools.coco import COCO
+from reassign_categories import reassign_category_ids
 import tensorflow as tf
 
 # Feature spec that matches the COCO TFRecord format
@@ -32,10 +33,6 @@ _FEATURES = {
 }
 
 
-
-from pycocotools.coco import COCO
-
-
 class COCOAnalysis:
     """
     Helper class to analyze COCO annotation file and extract class information.
@@ -45,6 +42,8 @@ class COCOAnalysis:
     """
     def __init__(self, annotation_path: str):
         self.coco = COCO(annotation_path)
+        # reassign_category_ids modifies self.coco in-place and rebuilds the index
+        reassign_category_ids(self.coco)
         self.category_ids = sorted(self.coco.getCatIds())
         self.categories = self.coco.loadCats(self.category_ids)
 
@@ -230,7 +229,7 @@ def maybe_random_crop(img, masks, bboxes, cat_ids):
 
 
 @tf.function
-def parse_example(
+def _parse_example_base(
         serialized,
         target_height,
         target_width,
@@ -257,12 +256,18 @@ def parse_example(
             - image_resized (tf.Tensor): Resized image [target_height, target_width, 3] (float32) in [0, 1].
             - cate_targets (tf.Tensor): Concatenated category targets from all scales [sum(S_i^2)] (int32).
             - mask_targets (tf.Tensor): Concatenated per-cell masks across all scales [Hf, Wf, sum(S_i^2)] (uint8).
+            - image_id (tf.Tensor): Image ID.
+            - original_height (tf.Tensor): Original image height.
+            - original_width (tf.Tensor): Original image width.
     """
 
     ex = tf.io.parse_single_example(serialized, _FEATURES)
 
     # Scalars
     img_enc = ex["image/encoded"]  # bytes
+    image_id = ex["image/id"]
+    original_height = ex["image/height"]
+    original_width = ex["image/width"]
 
     # Variable-length (per-object) -> dense 1D tensors
     xmin = sparse_to_dense_1d(ex["image/object/bbox/xmin"], tf.float32)
@@ -345,7 +350,72 @@ def parse_example(
     masks_resized = tf.transpose(masks_resized, perm=[1, 2, 0])
     cat_ids = cat_ids - 1  # convert to 0-based category ids
 
-    return image_resized, cat_ids, masks_resized
+    return image_resized, cat_ids, masks_resized, image_id, original_height, original_width
+
+
+@tf.function
+def parse_example(
+        serialized,
+        target_height,
+        target_width,
+        scale,
+        augment):
+    """
+    Parse one TFRecord example and build multi-scale Mask2Former training targets.
+
+    This function parses a single serialized example, decodes the image and per-instance masks,
+    optionally applies augmentations (flip, random crop, brightness), resizes the image and masks,
+    scales boxes, and generates per-scale targets.
+    It then concatenates category targets (flattened per scale) and mask targets
+    (concatenated along channel axis).
+
+    Args:
+        serialized (tf.Tensor): Scalar string Tensor. A single serialized `tf.train.Example`.
+        target_height (int): Output image height.
+        target_width (int): Output image width.
+        scale (float): Feature-map downscale factor (e.g., 0.25 -> 1/4) for sqrt(area) gating.
+        augment (bool): If True, apply data augmentations.
+
+    Returns:
+        tuple: A tuple containing:
+            - image_resized (tf.Tensor): Resized image [target_height, target_width, 3] (float32) in [0, 1].
+            - cate_targets (tf.Tensor): Concatenated category targets from all scales [sum(S_i^2)] (int32).
+            - mask_targets (tf.Tensor): Concatenated per-cell masks across all scales [Hf, Wf, sum(S_i^2)] (uint8).
+    """
+    r = _parse_example_base(serialized, target_height, target_width, scale, augment)
+    # Return first 3 elements: image_resized, cat_ids, masks_resized
+    return r[0], r[1], r[2]
+
+
+@tf.function
+def parse_eval_example(
+        serialized,
+        target_height,
+        target_width,
+        scale,
+        augment):
+    """
+    Parse one TFRecord example for evaluation, including metadata.
+
+    Args:
+        serialized (tf.Tensor): Scalar string Tensor. A single serialized `tf.train.Example`.
+        target_height (int): Output image height.
+        target_width (int): Output image width.
+        scale (float): Feature-map downscale factor.
+        augment (bool): If True, apply data augmentations.
+
+    Returns:
+        tuple: A tuple containing:
+            - image_resized (tf.Tensor): Resized image [target_height, target_width, 3] (float32) in [0, 1].
+            - cate_targets (tf.Tensor): Concatenated category targets from all scales [sum(S_i^2)] (int32).
+            - mask_targets (tf.Tensor): Concatenated per-cell masks across all scales [Hf, Wf, sum(S_i^2)] (uint8).
+            - image_id (tf.Tensor): Image ID.
+            - original_height (tf.Tensor): Original image height.
+            - original_width (tf.Tensor): Original image width.
+    """
+    # Return all 6 elements
+    return _parse_example_base(serialized, target_height, target_width, scale, augment)
+
 
 
 def create_coco_tfrecord_dataset(
@@ -425,6 +495,100 @@ def create_coco_tfrecord_dataset(
             tf.constant(-1, dtype=tf.int32),
             tf.constant(0, dtype=tf.uint8),
         ),
+        drop_remainder=True
+    )
+    ds = ds.prefetch(tf.data.AUTOTUNE)
+    return ds
+
+
+def create_coco_eval_dataset(
+    train_tfrecord_directory: str,
+    target_size: Tuple[int, int],
+    batch_size: int,
+    scale: float = 2.5,
+    deterministic: bool = False,
+    augment: bool = False,
+    shuffle_buffer_size: Optional[int] = None,
+    number_images: Optional[int] = None
+) -> tf.data.Dataset:
+    """
+    Create a `tf.data.Dataset` from COCO TFRecord shards and emit Mask2Former targets.
+
+    This utility scans a directory for `*.tfrecord` shards, builds a streaming `TFRecordDataset`,
+    optionally shuffles and/or limits the number of examples, parses each example,
+    constructs multi-scale Mask2Former targets, and batches/prefetches the dataset.
+
+    Args:
+        train_tfrecord_directory (str): Path to directory containing TFRecord shards.
+        target_size (tuple): Target (height, width) for image & mask resizing.
+        batch_size (int): Batch size for the resulting dataset.
+        scale (float, optional): Feature-map scale factor used in target generation (e.g., 2.5).
+            Defaults to 2.5.
+        deterministic (bool, optional): If False, allow non-deterministic map parallelism.
+            Defaults to False.
+        augment (bool, optional): If True, apply data augmentations in `parse_example`.
+            Defaults to True.
+        shuffle_buffer_size (int, optional): Optional shuffle buffer size. If provided, shuffling is enabled.
+            Defaults to None.
+        number_images (int, optional): Optional cap on the number of images to take from the stream.
+            Defaults to None.
+
+    Returns:
+        tf.data.Dataset: A dataset of batched tuples:
+            - image_resized (tf.Tensor): [B, Ht, Wt, 3] (float32) in [0, 1].
+            - cate_targets (tf.Tensor): [B, N] (int32).
+            - mask_targets (tf.Tensor): [B, Hf, Wf, N] (uint8).
+            - image_id (tf.Tensor): Image ID.
+            - original_height (tf.Tensor): Original image height.
+            - original_width (tf.Tensor): Original image width.
+    """
+    target_height, target_width = target_size
+    augment_tf = tf.constant(augment)
+
+    # Gather all shard paths (common suffixes)
+    pattern = "*.tfrecord"
+    files = tf.io.gfile.glob(os.path.join(train_tfrecord_directory, pattern))
+
+    if not files:
+        raise FileNotFoundError(f"No TFRecord files found in: {train_tfrecord_directory}")
+
+    ds = tf.data.TFRecordDataset(files, num_parallel_reads=len(files))
+
+    if shuffle_buffer_size is not None:
+        ds = ds.shuffle(buffer_size=shuffle_buffer_size, reshuffle_each_iteration=True)
+
+    if number_images is not None:
+        ds = ds.take(number_images)
+
+    # Parse
+    ds = ds.map(
+        lambda x: parse_eval_example(
+            x, target_height=target_height, target_width=target_width, scale=scale, augment=augment_tf
+        ),
+        num_parallel_calls=tf.data.AUTOTUNE, deterministic=deterministic
+    )
+
+    padded_shapes = (
+        [target_size[0], target_size[1], 3],  # image shape
+        [None, ],  # cate_target shape (num_instances,)
+        [int(round(target_size[0] * scale)), int(round(target_size[1] * scale)), None],
+        [], # image_id (scalar)
+        [], # original_height (scalar)
+        []  # original_width (scalar)
+    )
+    padding_values = (
+        tf.constant(0.0, dtype=tf.float32),
+        tf.constant(-1, dtype=tf.int32),
+        tf.constant(0, dtype=tf.uint8),
+        tf.constant(0, dtype=tf.int64),
+        tf.constant(0, dtype=tf.int64),
+        tf.constant(0, dtype=tf.int64),
+    )
+
+    ds = ds.padded_batch(
+        batch_size=batch_size,
+        padded_shapes=padded_shapes,
+        padding_values=padding_values,
         drop_remainder=True
     )
     ds = ds.prefetch(tf.data.AUTOTUNE)

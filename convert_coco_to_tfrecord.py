@@ -35,6 +35,8 @@ from pycocotools import mask as coco_mask
 from pycocotools.coco import COCO
 import tensorflow as tf
 
+from reassign_categories import reassign_category_ids
+
 
 def _bytes_feature(value: bytes) -> tf.train.Feature:
     """
@@ -342,6 +344,10 @@ def convert(
         Prints periodic progress and a final JSON summary of totals and skips.
     """
     coco = COCO(str(annotations_json))
+
+    # Reassign category IDs to be contiguous
+    print("Reassigning category IDs...")
+    reassign_category_ids(coco)
 
     img_ids = sorted(coco.getImgIds())
     images = coco.loadImgs(img_ids)
