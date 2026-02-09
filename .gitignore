@@ -27,3 +27,4 @@ data/coco_classes.txt
 # exceptions
 !images/readme
 !images/test
+/predictions.json

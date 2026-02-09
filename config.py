@@ -16,6 +16,7 @@ class Mask2FormerConfig(object):
     def __init__(self):
         self.coco_root_path = '/path/to/your/coco/root/directory'
         self.train_annotation_path = f'{self.coco_root_path}/annotations/instances_train2017.json'
+        self.val_annotation_path = f'{self.coco_root_path}/annotations/instances_val2017.json'
         self.tfrecord_dataset_directory_path = 'path/to/tfrecords/train/directory'  # Path to TFRecord dataset directory
         self.number_images=None  # Restriction for dataset. Set None to get rid of the restriction
 
