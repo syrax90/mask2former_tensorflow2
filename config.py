@@ -20,6 +20,12 @@ class Mask2FormerConfig(object):
         self.tfrecord_dataset_directory_path = 'path/to/tfrecords/train/directory'  # Path to TFRecord dataset directory
         self.number_images=None  # Restriction for dataset. Set None to get rid of the restriction
 
+        # Panoptic parameters
+        self.use_panoptic_dataset = False
+        self.panoptic_train_annotation_path = f'{self.coco_root_path}/annotations/panoptic_train2017.json'
+        self.tfrecord_panoptic_dataset_directory_path = 'path/to/tfrecords/panoptic_train/directory'     # Path to panoptic TFRecord dataset directory
+        self.tfrecord_panoptic_test_path = 'path/to/tfrecords/panoptic_test/directory'  # Path to panoptic TFRecord test dataset directory. Used for mAP calculation.
+
         # Image parameters
         self.img_height = 480
         self.img_width = 480

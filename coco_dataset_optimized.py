@@ -30,6 +30,10 @@ _FEATURES = {
     "image/object/category_id": tf.io.VarLenFeature(tf.int64),
     "image/object/iscrowd": tf.io.VarLenFeature(tf.int64),
     "image/object/mask_png": tf.io.VarLenFeature(tf.string),
+    
+    # Panoptic fields
+    "image/panoptic/png": tf.io.FixedLenFeature([], tf.string, default_value=''),
+    "image/object/segment_id": tf.io.VarLenFeature(tf.int64),
 }
 
 
@@ -41,7 +45,29 @@ class COCOAnalysis:
         annotation_path (str): Path to the COCO annotation JSON file.
     """
     def __init__(self, annotation_path: str):
-        self.coco = COCO(annotation_path)
+        try:
+            self.coco = COCO(annotation_path)
+        except Exception:
+            # Fallback for Panoptic or other formats where COCO might fail on createIndex
+            print(f"COCO API failed to load {annotation_path}. Attempting manual load for categories.")
+            import json
+            with open(annotation_path, 'r') as f:
+                dataset = json.load(f)
+            
+            # Create a dummy COCO-like object
+            class DummyCOCO:
+                def __init__(self, dataset):
+                    self.dataset = dataset
+                    self.cats = {cat['id']: cat for cat in dataset.get('categories', [])}
+                def getCatIds(self):
+                    return sorted(self.cats.keys())
+                def loadCats(self, ids):
+                    return [self.cats[id] for id in ids]
+                def createIndex(self):
+                    pass # Dummy
+
+            self.coco = DummyCOCO(dataset)
+
         # reassign_category_ids modifies self.coco in-place and rebuilds the index
         reassign_category_ids(self.coco)
         self.category_ids = sorted(self.coco.getCatIds())
@@ -296,12 +322,40 @@ def _parse_example_base(
                   lambda: img,
                   lambda: tf.image.grayscale_to_rgb(img))
 
-    # Decode each per-object PNG into [H, W] uint8;
-    def _decode_one(png_bytes):
-        m = tf.io.decode_png(png_bytes, channels=1)  # [H,W,1]
-        return tf.squeeze(m, axis=-1)  # [H,W]
+    
+    # Panoptic Logic
+    panoptic_png = ex["image/panoptic/png"]
+    segment_ids = sparse_to_dense_1d(ex["image/object/segment_id"], tf.int64)
 
-    masks = tf.map_fn(_decode_one, mask_pngs, fn_output_signature=tf.uint8)  # shape [N, H, W]
+    is_panoptic = tf.not_equal(tf.strings.length(panoptic_png), 0)
+
+    def decode_panoptic():
+        # Decode panoptic png (RGB) -> ID map
+        pan_enc = tf.io.decode_png(panoptic_png, channels=3) # [H, W, 3]
+        pan_enc = tf.cast(pan_enc, tf.int32)
+        # ID = R + G*256 + B*256^2
+        id_map = pan_enc[:, :, 0] + 256 * pan_enc[:, :, 1] + 65536 * pan_enc[:, :, 2] # [H, W] of int32
+        
+        # We need to generate boolean masks for each segment_id in segment_ids
+        # segment_ids: [N]
+        # id_map: [H, W]
+        # Output: [N, H, W]
+        
+        # Reshape for broadcasting
+        id_map_exp = tf.expand_dims(id_map, 0) # [1, H, W]
+        seg_ids_exp = tf.reshape(segment_ids, [-1, 1, 1]) # [N, 1, 1]
+        
+        # Create masks
+        masks_pan = tf.equal(id_map_exp, tf.cast(seg_ids_exp, tf.int32))
+        return tf.cast(masks_pan, tf.uint8) * 255
+
+    def decode_instance():
+        def _decode_one(png_bytes):
+            m = tf.io.decode_png(png_bytes, channels=1)  # [H,W,1]
+            return tf.squeeze(m, axis=-1)  # [H,W]
+        return tf.map_fn(_decode_one, mask_pngs, fn_output_signature=tf.uint8)  # shape [N, H, W]
+
+    masks = tf.cond(is_panoptic, decode_panoptic, decode_instance)
 
     def _apply_augmentation():
         # Horizontal flip

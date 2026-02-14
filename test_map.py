@@ -28,9 +28,10 @@ def main():
     cfg = Mask2FormerConfig()
 
     # Setup Data
-    print(f"Loading test dataset from: {cfg.tfrecord_test_path}")
+    tfrecord_test_path = cfg.tfrecord_panoptic_test_path if cfg.use_panoptic_dataset else cfg.tfrecord_test_path
+    print(f"Loading test dataset from: {tfrecord_test_path}")
     dataset = create_coco_eval_dataset(
-        cfg.tfrecord_test_path,
+        tfrecord_test_path,
         target_size=(cfg.img_height, cfg.img_width),
         batch_size=1,  # Process one by one to handle resizing back to original dims easily
         scale=cfg.image_scales[0],
@@ -41,7 +42,10 @@ def main():
     )
 
     # Setup Model
-    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    if cfg.use_panoptic_dataset:
+        coco_info = COCOAnalysis(cfg.panoptic_train_annotation_path)
+    else:
+        coco_info = COCOAnalysis(cfg.train_annotation_path)
     num_classes = coco_info.get_num_classes()
     # Map from model index (0..N-1) to COCO category ID
     # Note: parse_example in training subtracts 1 from category_id.
