@@ -38,9 +38,17 @@ def reassign_category_ids(coco: COCO) -> None:
     # Update annotations
     annotations = coco.dataset.get("annotations", [])
     for ann in annotations:
-        old_cat_id = ann["category_id"]
-        if old_cat_id in old_to_new:
-            ann["category_id"] = old_to_new[old_cat_id]
+        # Check for Panoptic format
+        if "segments_info" in ann:
+            for seg in ann["segments_info"]:
+                old_cat_id = seg["category_id"]
+                if old_cat_id in old_to_new:
+                    seg["category_id"] = old_to_new[old_cat_id]
+        # Check for Instance format
+        elif "category_id" in ann:
+            old_cat_id = ann["category_id"]
+            if old_cat_id in old_to_new:
+                ann["category_id"] = old_to_new[old_cat_id]
 
     # Rebuild index
     coco.createIndex()

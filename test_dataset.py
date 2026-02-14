@@ -183,15 +183,20 @@ if gpus:
 
 if __name__ == '__main__':
     cfg = Mask2FormerConfig()
-    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    if cfg.use_panoptic_dataset:
+        coco_info = COCOAnalysis(cfg.panoptic_train_annotation_path)
+    else:
+        coco_info = COCOAnalysis(cfg.train_annotation_path)
     categories = coco_info.categories
     coco_classes = {cat['id'] - 1: cat['name'] for cat in categories}
 
     num_classes = len(coco_classes)
     img_height, img_width = cfg.img_height, cfg.img_width
 
+    train_tfrecord_directory = cfg.tfrecord_panoptic_dataset_directory_path if cfg.use_panoptic_dataset else cfg.tfrecord_dataset_directory_path
+
     ds = create_coco_tfrecord_dataset(
-        train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
+        train_tfrecord_directory=train_tfrecord_directory,
         target_size=(img_height, img_width),
         batch_size=cfg.batch_size,
         scale=cfg.image_scales[0],

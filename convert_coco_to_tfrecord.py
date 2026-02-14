@@ -198,6 +198,172 @@ def load_image_bytes_and_size(path: Path) -> Tuple[bytes, int, int, str]:
     return data, height, width, fmt
 
 
+def rgb2id(color):
+    """
+    Converts a 3-channel RGB value to a unique ID.
+    (R + G*256 + B*256^2)
+    Args:
+        color (np.ndarray): Array of shape (H, W, 3).
+    Returns:
+        np.ndarray: Array of shape (H, W) with unique IDs.
+    """
+    if isinstance(color, np.ndarray) and len(color.shape) == 3:
+        if color.dtype == np.uint8:
+            color = color.astype(np.int32)
+        return color[:, :, 0] + 256 * color[:, :, 1] + 256 * 256 * color[:, :, 2]
+    return int(color[0] + 256 * color[1] + 256 * 256 * color[2])
+
+
+def convert_panoptic(
+    images_root: Path,
+    panoptic_json: Path,
+    panoptic_masks_root: Path,
+    output_pattern: str,
+    num_shards: int = 1
+) -> None:
+    """
+    Converts COCO Panoptic annotations + images into TFRecord(s).
+
+    Args:
+        images_root (Path): Directory containing the image files.
+        panoptic_json (Path): Path to the panoptic JSON annotations.
+        panoptic_masks_root (Path): Directory containing the panoptic PNG maps.
+        output_pattern (str): Output TFRecord path or pattern.
+        num_shards (int, optional): Number of shards to write. Defaults to 1.
+    """
+    with open(panoptic_json, 'r') as f:
+        panoptic_data = json.load(f)
+
+    categories = panoptic_data['categories']
+    categories.sort(key=lambda x: x["id"])
+    
+    # Create mapping same as in reassign_categories.py
+    old_to_new = {}
+    for new_id, cat in enumerate(categories, start=1):
+        old_id = cat["id"]
+        old_to_new[old_id] = new_id
+
+    images = panoptic_data['images']
+    # 'annotations' in panoptic json is a list of per-image annotations
+    annotations = {ann['image_id']: ann for ann in panoptic_data['annotations']}
+
+    skipped_missing = 0
+    total = 0
+    written = 0
+
+    writers, shard_of = open_sharded_writers(output_pattern, num_shards)
+
+    try:
+        for idx, img in enumerate(images):
+            total += 1
+            file_name = img["file_name"]
+            img_path = images_root / file_name
+            if not img_path.exists():
+                skipped_missing += 1
+                continue
+
+            try:
+                img_bytes, h, w, fmt = load_image_bytes_and_size(img_path)
+            except Exception:
+                skipped_missing += 1
+                continue
+
+            ann = annotations.get(img['id'])
+            if not ann:
+                 continue
+
+            # Load Panoptic Mask
+            pan_mask_filename = ann['file_name']
+            pan_mask_path = panoptic_masks_root / pan_mask_filename
+            if not pan_mask_path.exists():
+                 skipped_missing += 1
+                 continue
+            
+            with open(pan_mask_path, "rb") as f:
+                pan_mask_bytes = f.read()
+
+            segments_info = ann['segments_info']
+            
+            # Prepare Lists
+            xmins = []
+            ymins = []
+            xmaxs = []
+            ymaxs = []
+            areas = []
+            cat_ids = []
+            iscrowds = []
+            segment_ids = []
+
+            for seg in segments_info:
+                # Panoptic bbox is [x, y, w, h]
+                xmin, ymin, xmax, ymax = coco_bbox_to_xyxy(seg["bbox"])
+                xmins.append(xmin)
+                ymins.append(ymin)
+                xmaxs.append(xmax)
+                ymaxs.append(ymax)
+                areas.append(float(seg["area"]))
+                
+                # Reassign category ID
+                old_cat_id = seg["category_id"]
+                if old_cat_id in old_to_new:
+                    cat_ids.append(old_to_new[old_cat_id])
+                else:
+                    # Fallback or skip? Ideally shouldn't happen if categories list is complete.
+                    cat_ids.append(old_cat_id)
+                
+                iscrowds.append(int(seg["iscrowd"]))
+                segment_ids.append(int(seg["id"]))
+
+            example = tf.train.Example(
+                features=tf.train.Features(
+                    feature={
+                        "image/encoded": _bytes_feature(img_bytes),
+                        "image/height": _int64_feature(int(h)),
+                        "image/width": _int64_feature(int(w)),
+                        "image/filename": _bytes_feature(file_name.encode("utf-8")),
+                        "image/id": _int64_feature(int(img['id'])),
+                        "image/format": _bytes_feature((fmt or "").encode("utf-8")),
+                        
+                        "image/panoptic/png": _bytes_feature(pan_mask_bytes),
+
+                         # Object fields
+                        "image/object/bbox/xmin": _float_list_feature(xmins),
+                        "image/object/bbox/ymin": _float_list_feature(ymins),
+                        "image/object/bbox/xmax": _float_list_feature(xmaxs),
+                        "image/object/bbox/ymax": _float_list_feature(ymaxs),
+                        "image/object/area": _float_list_feature(areas),
+                        "image/object/category_id": _int64_list_feature(cat_ids),
+                        "image/object/iscrowd": _int64_list_feature(iscrowds),
+                        "image/object/segment_id": _int64_list_feature(segment_ids),
+                    }
+                )
+            )
+
+            shard_id = shard_of(idx)
+            writers[shard_id].write(example.SerializeToString())
+            written += 1
+
+            if written % 500 == 0:
+                print(f"progress: written={written} / seen={total}")
+
+    finally:
+         for w in writers:
+            w.close()
+    
+    print(
+        json.dumps(
+            {
+                "total_images": total,
+                "written": written,
+                "skipped_missing_files": skipped_missing,
+                "output_pattern": output_pattern,
+                "num_shards": num_shards,
+            },
+            indent=2,
+        )
+    )
+
+
 def open_sharded_writers(output_pattern: str, num_shards: int):
     """
     Creates TFRecord writers for (optionally) sharded output.
@@ -320,6 +486,7 @@ def convert(
     output_pattern: str,
     num_shards: int = 1,
     allow_empty_masks: bool = False,
+    panoptic_masks_root: Path = None,
 ) -> None:
     """
     Converts COCO annotations + images into TFRecord(s) with masks.
@@ -336,6 +503,7 @@ def convert(
         num_shards (int, optional): Number of shards to write. Defaults to `1`.
         allow_empty_masks (bool, optional): If `True`, keep annotations whose decoded mask
             is empty. If `False`, empty masks are dropped. Defaults to `False`.
+        panoptic_masks_root (Path, optional): Directory where panoptic mask PNGs are stored. If set, `annotations_json` is treated as Panoptic JSON. Defaults to None.
 
     Returns:
         None
@@ -343,6 +511,16 @@ def convert(
     Logs:
         Prints periodic progress and a final JSON summary of totals and skips.
     """
+    if panoptic_masks_root:
+        convert_panoptic(
+            images_root,
+            annotations_json,
+            panoptic_masks_root,
+            output_pattern,
+            num_shards
+        )
+        return
+
     coco = COCO(str(annotations_json))
 
     # Reassign category IDs to be contiguous
@@ -460,7 +638,7 @@ def parse_args() -> argparse.Namespace:
     """
     p = argparse.ArgumentParser(description="COCO -> TFRecord converter with masks")
     p.add_argument("--images_root", type=Path, required=True, help="Directory where images are stored")
-    p.add_argument("--annotations", type=Path, required=True, help="Path to COCO annotations JSON")
+    p.add_argument("--annotations", type=Path, required=True, help="Path to COCO annotations JSON (Instance or Panoptic)")
     p.add_argument(
         "--output",
         type=str,
@@ -475,6 +653,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="If set, keep anns whose decoded mask is empty (default: drop)",
     )
+    p.add_argument("--panoptic_masks_root", type=Path, default=None, help="Directory where panoptic mask PNGs are stored")
     return p.parse_args()
 
 
@@ -486,4 +665,5 @@ if __name__ == "__main__":
         output_pattern=args.output,
         num_shards=args.num_shards,
         allow_empty_masks=args.allow_empty_masks,
+        panoptic_masks_root=args.panoptic_masks_root,
     )

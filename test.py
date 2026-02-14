@@ -231,7 +231,7 @@ def draw_instance_masks(
 
         ys, xs = np.where(mask_orig == 1)
         if len(ys) > 0:
-            y0, x0 = ys[0], xs[0]
+            y0, x0 = int(np.mean(ys)), int(np.mean(xs))
             score_str = f"{inst['score']:.2f}"
             if class_names and (0 <= inst['class_id'] < len(class_names)):
                 label_str = f"{class_names.get(inst['class_id'])}"#: {score_str}"
@@ -259,11 +259,13 @@ if __name__ == '__main__':
 
     model_path = cfg.test_model_path
     input_shape = (cfg.img_height, cfg.img_width, 3)
-    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    if cfg.use_panoptic_dataset:
+        coco_info = COCOAnalysis(cfg.panoptic_train_annotation_path)
+    else:
+        coco_info = COCOAnalysis(cfg.train_annotation_path)
     categories = coco_info.categories
     coco_classes = {cat['id'] - 1: cat['name'] for cat in categories}
 
-    coco_info = COCOAnalysis(cfg.train_annotation_path)
     num_classes = coco_info.get_num_classes()
     img_height, img_width = cfg.img_height, cfg.img_width
     model = Mask2FormerModel(

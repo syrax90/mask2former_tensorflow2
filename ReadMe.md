@@ -9,7 +9,7 @@ Mask2Former is a model designed for computer vision tasks, specifically instance
 > Bowen Cheng, Ishan Misra, Alexander G. Schwing, Alexander Kirillov, Rohit Girdhar
 > *arXiv preprint ([arXiv:2112.01527](https://arxiv.org/abs/2112.01527))*
 
-To understand instance segmentation better, consider the example below, where multiple objects—whether of the same or different classes—are identified as separate instances, each with its own segmentation mask (and the probability of belonging to a certain class):   
+To understand instance or panoptic segmentation better, consider the example below, where multiple objects—whether of the same or different classes—are identified as separate instances, each with its own segmentation mask (and the probability of belonging to a certain class):
 
 ![Instance segmentation picture](images/readme/my_photo_with_masks.jpg)
 
@@ -52,11 +52,30 @@ python convert_coco_to_tfrecord.py \
   --num_shards 4
 ```
 
+For Panoptic Segmentation:
+
+```bash
+python convert_coco_to_tfrecord.py \
+  --images_root /path/to/images \
+  --annotations /path/to/panoptic_train.json \
+  --panoptic_masks_root /path/to/panoptic_masks \
+  --output /path/to/out/panoptic_train.tfrecord \
+  --num_shards 4
+```
+
 2) Set corresponding settings in `config.py` file:
 
 ```python
 self.tfrecord_dataset_directory_path  = 'path/to/tfrecords/train/directory'
 self.tfrecord_test_path = 'path/to/tfrecords/test/directory'
+```
+
+For Panoptic Segmentation:
+
+```python
+self.use_panoptic_dataset = True
+self.tfrecord_panoptic_dataset_directory_path = 'path/to/tfrecords/panoptic_train/directory'
+self.tfrecord_panoptic_test_path = 'path/to/tfrecords/panoptic_test/directory'
 ```
 
 ## Configuration
@@ -79,6 +98,16 @@ Set the path to the dataset's annotation file:
 
 ```python
 self.train_annotation_path = f'{self.coco_root_path}/annotations/instances_train2017.json'
+```
+
+For Panoptic Segmentation:
+
+```python
+# Panoptic Segmentation
+self.use_panoptic_dataset = True
+self.panoptic_train_annotation_path = f'{self.coco_root_path}/annotations/panoptic_train2017.json'
+self.tfrecord_panoptic_dataset_directory_path = 'path/to/tfrecords/panoptic_train/directory'
+self.tfrecord_panoptic_test_path = 'path/to/tfrecords/panoptic_test/directory'
 ```
 
 And you can find other intuitive parameters:
@@ -181,10 +210,9 @@ Output images with masks and class labels will be saved in the `/images/res` dir
 
 It is possible to evaluate the data fed to the model before training to ensure that the masks, classes, and scales are applied correctly:
 
-This script generates images with instance masks and their corresponding category labels. The outputs are saved in `images/dataset_test`.
+This script generates images with instance or panoptic masks and their corresponding category labels. The outputs are saved in `images/dataset_test`.
 
 By default, it processes the first 200 randomly selected images. To change or remove this limit, edit `test_dataset.py`.
-
 
 ## Test mAP
 
@@ -194,6 +222,14 @@ There is possibility to evaluate how accurate the model is.
 
 ```python
 self.tfrecord_test_path = path/to/tfrecords/test/directory'  # Path to TFRecord test dataset directory. Used for mAP calculation.
+```
+
+For Panoptic Segmentation:
+
+```python
+# Panoptic Segmentation
+self.use_panoptic_dataset = True
+self.tfrecord_panoptic_test_path = 'path/to/tfrecords/panoptic_test/directory'
 ```
 
 2) Run the test mAP script:

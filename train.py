@@ -243,7 +243,10 @@ def run_one_epoch_accumulated_mode(model,
 if __name__ == '__main__':
     cfg = Mask2FormerConfig()
 
-    coco_info = COCOAnalysis(cfg.train_annotation_path)
+    if cfg.use_panoptic_dataset:
+        coco_info = COCOAnalysis(cfg.panoptic_train_annotation_path)
+    else:
+        coco_info = COCOAnalysis(cfg.train_annotation_path)
     num_classes = coco_info.get_num_classes()
     batch_size = cfg.batch_size
     img_height, img_width = cfg.img_height, cfg.img_width
@@ -344,8 +347,10 @@ if __name__ == '__main__':
         exit(0)
 
     # Form COCO dataset
+    train_tfrecord_directory = cfg.tfrecord_panoptic_dataset_directory_path if cfg.use_panoptic_dataset else cfg.tfrecord_dataset_directory_path
+
     ds = create_coco_tfrecord_dataset(
-        train_tfrecord_directory=cfg.tfrecord_dataset_directory_path,
+        train_tfrecord_directory=train_tfrecord_directory,
         target_size=(img_height, img_width),
         batch_size=cfg.batch_size,
         scale=cfg.image_scales[0],
